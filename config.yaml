@@ -1,16 +1,65 @@
 # OpenContext Configuration
 # ==========================
 #
-# San Diego City GIS MCP — derived from the Worcester GIS fork.
+# Audubon Important Bird Areas (IBA) MCP — derived from the San Diego City
+# GIS fork. Fronts a single fixed ArcGIS FeatureServer, so there is no
+# catalog to crawl and no dataset discovery.
 #
 # IMPORTANT: Enable ONLY ONE plugin per fork/deployment (One Fork = One MCP Server).
 # See docs/ARCHITECTURE.md for details.
 
 ---
 # Server metadata
-server_name: "San Diego City GIS"
-description: "City of San Diego GIS MCP server - Safe, conversational access to the city's ArcGIS Server layers"
-organization: "City of San Diego"
+server_name: "Audubon Important Bird Areas"
+description: "National Audubon Society Important Bird Areas (IBA) MCP server - conversational access to the public IBA feature service"
+organization: "National Audubon Society"
+
+# Server-level instructions
+# ========================
+#
+# Returned in the MCP `initialize` response, so clients prepend this to the
+# model's context once rather than us repeating it in every tool description.
+# This is where the interpretive guardrails live — above all, that an IBA is
+# a conservation priority, NOT a legal restriction.
+instructions: |
+  This server exposes the National Audubon Society's public Important Bird
+  Areas (IBA) feature service: polygon boundaries for sites identified as
+  priorities for bird conservation, plus the related tables behind each site.
+
+  What an IBA is:
+  - An IBA is a science-based conservation PRIORITY designation, applied
+    against BirdLife International / Audubon criteria. Sites are ranked
+    Global, Continental, or State in the `iba_priority` field — that rank is
+    the site's conservation significance, nothing more.
+
+  CRITICAL — what an IBA is NOT:
+  - IBA designation carries NO legal or regulatory force. It does not protect
+    land, restrict its use, encumber title, or trigger any permitting or
+    review requirement. Present an IBA as advisory conservation evidence, and
+    never as a land-use restriction or a constraint on what an owner may do.
+  - The boundaries are advisory, not authoritative property lines. Do not use
+    them to determine parcel boundaries, ownership, or jurisdiction.
+
+  How to work the tools:
+  - Fetch the main polygon record first (get_iba_details, or search_ibas /
+    find_ibas_near_point to locate a site_id). Pull related tables only when
+    the question actually needs them:
+      species, criteria, criteria_species  -> why the site was designated
+      threat, ownership, landuse           -> stewardship context
+      habitat                              -> ecosystem composition
+      observation                          -> historical survey records
+      description                          -> narrative site description
+  - `ebird_link` is the key integration point: it pre-joins each IBA to its
+    eBird hotspot/region. When a user wants recent or live sightings, surface
+    that link and chain to an eBird tool if one is available, rather than
+    reporting the stale records in the `observation` table.
+  - Absence of a related record means it was never entered, not that the
+    attribute does not apply to the site.
+
+  Data use:
+  - The endpoint is public, but Audubon routes formal reuse of the spatial
+    data through a request process. Flag that for anything beyond ad-hoc
+    display or analysis in conversation.
 
 # Plugin configuration
 # ====================
@@ -19,55 +68,32 @@ organization: "City of San Diego"
 # For additional MCP servers, fork this repository again
 #
 plugins:
-  # Built-in: CKAN (for CKAN-based open data portals)
-  ckan:
-    enabled: false # Set to true to use
-    base_url: "https://data.example.gov/" # CKAN API base URL
-    portal_url: "https://data.example.gov/" # Public portal URL
-    city_name: "Your City" # City/organization name
-    timeout: 120 # HTTP timeout in seconds
-    # api_key: "${CKAN_API_KEY}"  # Optional: CKAN API key for authenticated requests
-
-  # Built-in: ArcGIS Server directory (for bare ArcGIS Server REST services
-  # directories with no Hub/Open Data catalog in front of them).
+  # Audubon Important Bird Areas — a single fixed FeatureServer with a known
+  # schema. Layer 0 holds the IBA polygons; nine related tables hang off it
+  # (species, criteria, habitat, landuse, ownership, threat, observation,
+  # site_description) and are reached via queryRelatedRecords.
   #
-  # Discovery comes from a precomputed catalog manifest. Refresh it with:
-  #   python scripts/crawl_catalog.py
-  # then redeploy. The running server never crawls live.
-  arcgis:
+  # Layer 0's fields, coded-value domains, record cap (2000) and relationship
+  # ids are read from the service at runtime — nothing is hardcoded beyond the
+  # fields the tools name.
+  audubon_iba:
     enabled: true
-    services_url: "https://webmaps.sandiego.gov/arcgis/rest/services"
-    city_name: "City of San Diego"
+    service_url: "https://services1.arcgis.com/lDFzr3JyGEn5Eymu/arcgis/rest/services/iba_polygons_public/FeatureServer"
+    layer_id: 0 # IBA polygons
+    organization: "National Audubon Society"
     timeout: 120
-    geocoder_region: "San Diego, CA" # biases address geocoding to San Diego
-    catalog_path: "plugins/arcgis/catalog.json"
-    # token: "${ARCGIS_TOKEN}"  # Optional: token for non-anonymous services
-    #
-    # Known-good public layers, curated for search. Aliases/notes are applied
-    # at load time (no re-crawl needed to edit them). All three live in the
-    # anonymous Planning/PLN_LongRangePlanning MapServer.
-    featured_datasets:
-      - dataset_id: "Planning/PLN_LongRangePlanning/MapServer/7"
-        aliases: ["MHPA", "habitat preserve", "multi-habitat planning area"]
-        note: >-
-          Multi-Habitat Planning Area (MHPA) -- the City's habitat preserve
-          planning boundaries. Polygon layer. Key fields: HABPRES (int, %
-          targeted preservation), INHABPRES (Yes/No), SUBAREA, ACRES.
-      - dataset_id: "Planning/PLN_LongRangePlanning/MapServer/27"
-        aliases: ["zoning", "base zones", "zone"]
-        note: >-
-          Base Zones -- the official City of San Diego zoning layer.
-          Polygon layer; zone codes like RS-1-7, CC-3-5.
-      - dataset_id: "Planning/PLN_LongRangePlanning/MapServer/24"
-        aliases: ["land use", "community plan"]
-        note: >-
-          Community Plan Land Use -- adopted community plan land use
-          designations. Polygon layer.
+    # token: "${ARCGIS_TOKEN}"  # Not needed: the public IBA service is anonymous
+  #
+  # The other built-in plugins (ckan, arcgis, socrata, anchorage_gis) are
+  # deliberately NOT listed here. This whole file is serialized into the
+  # Lambda's OPENCONTEXT_CONFIG env var, and Lambda caps env vars at 4 KB
+  # total — disabled stanzas would burn that budget for nothing. See
+  # config-example.yaml for their shape.
 
 # AWS deployment settings
 aws:
   region: "us-west-2" # AWS region for Lambda
-  lambda_name: "sandiego-city-gis-mcp" # Lambda function name
+  lambda_name: "audubon-iba-mcp" # Lambda function name
   lambda_memory: 512 # Lambda memory in MB (128-10240)
   lambda_timeout: 120 # Lambda timeout in seconds (max 900)
 

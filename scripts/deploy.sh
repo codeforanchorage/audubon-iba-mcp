@@ -27,7 +27,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  --environment, -e   Deployment environment: staging or prod (required)"
-    echo "  --tfworkspace, -w   Terraform workspace name (default: sandiego-city-staging or sandiego-city-prod)"
+    echo "  --tfworkspace, -w   Terraform workspace name (default: audubon-iba-staging or audubon-iba-prod)"
     echo "  --help, -h          Show this help message"
 }
 
@@ -68,9 +68,9 @@ fi
 # Default workspace per environment when not explicitly provided
 if [ -z "$TF_WORKSPACE" ]; then
     if [ "$ENVIRONMENT" = "prod" ]; then
-        TF_WORKSPACE="sandiego-city-prod"
+        TF_WORKSPACE="audubon-iba-prod"
     else
-        TF_WORKSPACE="sandiego-city-staging"
+        TF_WORKSPACE="audubon-iba-staging"
     fi
 fi
 
@@ -233,6 +233,11 @@ EOF
 )
 
 TFVARS_FILE="terraform/aws/${ENVIRONMENT}.tfvars"
+if [ ! -f "$TFVARS_FILE" ]; then
+    echo -e "${RED}❌ Error: ${TFVARS_FILE} not found${NC}"
+    echo "Expected a tfvars file for the '${ENVIRONMENT}' environment."
+    exit 1
+fi
 LAMBDA_NAME=$(grep '^lambda_name' "$TFVARS_FILE" | sed 's/.*=\s*"\(.*\)"/\1/')
 
 echo -e "${YELLOW}📦 Step 2: Packaging Lambda code...${NC}"
@@ -248,6 +253,19 @@ cp -r plugins "$PACKAGE_DIR/"
 cp -r custom_plugins "$PACKAGE_DIR/" 2>/dev/null || mkdir -p "$PACKAGE_DIR/custom_plugins"
 cp -r server "$PACKAGE_DIR/"
 cp requirements.txt "$PACKAGE_DIR/" 2>/dev/null || true
+
+# Ship config.yaml INSIDE the package. Terraform sets OPENCONTEXT_CONFIG="" so
+# the handler reads this file at runtime — the full config (with the server
+# `instructions` block) would otherwise push against Lambda's hard 4KB limit on
+# total environment-variable size. Without this copy the Lambda has NO config.
+cp config.yaml "$PACKAGE_DIR/config.yaml"
+
+# Drop catalog manifests from the package. This fork runs the audubon_iba
+# plugin against a single fixed FeatureServer, so it loads no catalog --
+# plugins/arcgis/catalog.json is a 556K San Diego crawl artifact and would
+# be dead weight in the zip. The arcgis package itself must stay: audubon_iba
+# imports its shared where_validator.
+rm -f "$PACKAGE_DIR"/plugins/*/catalog.json
 
 # Install Python dependencies into package directory
 echo "Installing Python dependencies..."
@@ -348,17 +366,46 @@ rm -f tfplan
 
 # Get URLs from Terraform output
 API_GATEWAY_URL=$(terraform output -raw api_gateway_url 2>/dev/null || echo "")
+MCP_URL=$(terraform output -raw mcp_url 2>/dev/null || echo "$API_GATEWAY_URL")
+CUSTOM_DOMAIN_TARGET=$(terraform output -raw custom_domain_target 2>/dev/null || echo "")
+ACM_CNAME_NAME=$(terraform output -raw acm_validation_cname_name 2>/dev/null || echo "")
+ACM_CNAME_VALUE=$(terraform output -raw acm_validation_cname_value 2>/dev/null || echo "")
 
 cd ..
 
 echo ""
 echo -e "${GREEN}✅ Deployment complete!${NC}"
 echo ""
-echo "API Gateway URL (use for Claude Connectors):"
-echo -e "${GREEN}$API_GATEWAY_URL${NC}"
+
+# When a custom domain is configured, DNS lives outside Terraform — print the
+# two records an operator must create in codeforanchorage.org. Until both
+# resolve, the custom domain will NOT serve traffic (the API Gateway URL will).
+if [ -n "$CUSTOM_DOMAIN_TARGET" ]; then
+    echo -e "${YELLOW}📡 DNS records required in codeforanchorage.org:${NC}"
+    echo ""
+    echo "  1. ACM certificate validation (create this first — the cert stays"
+    echo "     pending until it resolves):"
+    echo "       CNAME ${ACM_CNAME_NAME}"
+    echo "          →  ${ACM_CNAME_VALUE}"
+    echo ""
+    CUSTOM_DOMAIN_HOST=$(echo "$MCP_URL" | sed -e 's|^https://||' -e 's|/mcp$||')
+    echo "  2. Traffic routing for the custom domain:"
+    echo "       CNAME ${CUSTOM_DOMAIN_HOST}"
+    echo "          →  ${CUSTOM_DOMAIN_TARGET}"
+    echo ""
+    echo "  Until both resolve, use the API Gateway URL below."
+    echo "  API Gateway URL: ${API_GATEWAY_URL}"
+    echo ""
+fi
+
+echo "MCP URL (use for Claude Connectors):"
+echo -e "${GREEN}$MCP_URL${NC}"
 echo ""
 echo "Connect via Claude Connectors (same on Claude.ai and Claude Desktop):"
 echo "  1. Go to Settings → Connectors (or Customize → Connectors on claude.ai)"
 echo "  2. Click 'Add custom connector'"
-echo "  3. Enter a name and URL: $API_GATEWAY_URL"
+echo "  3. Enter a name and URL: $MCP_URL"
+echo ""
+echo "Smoke test the deployment:"
+echo "  python scripts/smoke_prod.py $MCP_URL"
 echo ""

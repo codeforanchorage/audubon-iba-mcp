@@ -28,7 +28,8 @@ locals {
   lambda_memory  = local.config.aws.lambda_memory != null ? local.config.aws.lambda_memory : var.lambda_memory
   lambda_timeout = local.config.aws.lambda_timeout != null ? local.config.aws.lambda_timeout : var.lambda_timeout
 
-  # Serialize config to JSON for environment variable
+  # Still parsed (for lambda_name/memory/timeout above), but NOT passed to the
+  # Lambda as an env var -- see the OPENCONTEXT_CONFIG note on the function.
   config_json = jsonencode(local.config)
 }
 
@@ -84,9 +85,15 @@ resource "aws_lambda_function" "mcp_server" {
   # at the per-IP level; this is defense in depth and cost protection.
   reserved_concurrent_executions = var.lambda_reserved_concurrency
 
+  # Config is shipped INSIDE the deployment package as config.yaml and read at
+  # runtime (server/http_handler.py). It is NOT passed via OPENCONTEXT_CONFIG
+  # because the full config -- once the server `instructions` block is included
+  # -- would push against Lambda's hard 4KB limit on total environment-variable
+  # size, and `instructions` is the part most likely to keep growing.
+  # Leaving the env var empty makes the handler fall back to the packaged file.
   environment {
     variables = {
-      OPENCONTEXT_CONFIG = local.config_json
+      OPENCONTEXT_CONFIG = ""
     }
   }
 

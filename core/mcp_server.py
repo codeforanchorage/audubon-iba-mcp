@@ -20,13 +20,20 @@ logger = logging.getLogger(__name__)
 class MCPServer:
     """MCP Server that handles JSON-RPC requests and routes to Plugin Manager."""
 
-    def __init__(self, plugin_manager: PluginManager) -> None:
+    def __init__(
+        self,
+        plugin_manager: PluginManager,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Initialize MCP Server with Plugin Manager.
 
         Args:
             plugin_manager: Initialized Plugin Manager instance
+            config: Optional parsed configuration. Supplies `server_name`
+                and the `instructions` returned to clients on initialize.
         """
         self.plugin_manager = plugin_manager
+        self.config = config or {}
 
     async def handle_request(
         self,
@@ -164,22 +171,33 @@ class MCPServer:
     async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle initialize request.
 
+        The optional `instructions` field carries server-level guidance that
+        MCP clients prepend to the model's context -- the place to state how
+        this server's data should and should not be interpreted, rather than
+        repeating it in every tool description.
+
         Args:
             params: Initialize parameters
 
         Returns:
             Initialize response
         """
-        return {
+        result = {
             "protocolVersion": "2025-03-26",
             "capabilities": {
                 "tools": {},
             },
             "serverInfo": {
-                "name": "opencontext",
+                "name": self.config.get("server_name") or "opencontext",
                 "version": "1.0.0",
             },
         }
+
+        instructions = (self.config.get("instructions") or "").strip()
+        if instructions:
+            result["instructions"] = instructions
+
+        return result
 
     async def _handle_tools_list(self) -> Dict[str, Any]:
         """Handle tools/list request.

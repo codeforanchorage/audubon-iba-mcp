@@ -24,6 +24,15 @@ output "api_gateway_url" {
 }
 
 # ── Custom domain outputs (only populated when var.custom_domain is set) ────
+#
+# DNS for codeforanchorage.org is managed outside Terraform, so a custom-domain
+# deploy takes TWO DNS records, both emitted here:
+#
+#   1. acm_validation_cname_{name,value} — proves domain control to ACM. The
+#      cert stays PENDING_VALIDATION (and the apply blocks) until this record
+#      resolves, so create it first.
+#   2. audubon-iba.codeforanchorage.org CNAME → custom_domain_target — routes
+#      real traffic to the API Gateway regional endpoint.
 
 output "acm_certificate_arn" {
   description = "ARN of the ACM certificate for the custom domain"
@@ -31,7 +40,7 @@ output "acm_certificate_arn" {
 }
 
 output "acm_validation_cname_name" {
-  description = "DNS CNAME record name that city IT must create for ACM validation"
+  description = "DNS CNAME record name to create in codeforanchorage.org for ACM validation"
   value       = var.custom_domain != "" ? tolist(aws_acm_certificate.mcp_cert[0].domain_validation_options)[0].resource_record_name : null
 }
 
@@ -41,6 +50,11 @@ output "acm_validation_cname_value" {
 }
 
 output "custom_domain_target" {
-  description = "API Gateway regional domain name — city IT points the custom domain CNAME here"
+  description = "API Gateway regional domain name — point the custom domain's CNAME here"
   value       = var.custom_domain != "" ? aws_api_gateway_domain_name.custom[0].regional_domain_name : null
+}
+
+output "mcp_url" {
+  description = "The public MCP endpoint to paste into Claude Connectors (custom domain when set, else the raw API Gateway URL)"
+  value       = var.custom_domain != "" ? "https://${var.custom_domain}/mcp" : "${aws_api_gateway_stage.prod.invoke_url}/mcp"
 }

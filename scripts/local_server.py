@@ -53,7 +53,7 @@ async def init_server():
     await _plugin_manager.load_plugins()
 
     # Initialize MCP Server
-    _mcp_server = MCPServer(_plugin_manager)
+    _mcp_server = MCPServer(_plugin_manager, config)
 
     print("✅ Server initialized successfully")
     print(f"Loaded plugins: {list(_plugin_manager.plugins.keys())}")

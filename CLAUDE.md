@@ -2,14 +2,38 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**San Diego City fork.** This is a City of San Diego fork of the OpenContext MCP server framework (forked from the Worcester GIS fork). It serves the City's bare ArcGIS Server REST services directory (`webmaps.sandiego.gov/arcgis/rest/services`, ArcGIS Enterprise 11.5) via the built-in `arcgis` plugin (see `config.yaml`). There is NO ArcGIS Hub catalog in front of this host, so discovery comes from a **precomputed catalog manifest** (`plugins/arcgis/catalog.json`) built offline by `scripts/crawl_catalog.py` and bundled with the deployment — the running server never crawls live. To refresh the catalog, re-run the crawler and redeploy.
+**Audubon IBA fork.** This is a National Audubon Society Important Bird Areas fork of the OpenContext MCP server framework (forked from the San Diego City GIS fork). It serves Audubon's public IBA feature service via the `audubon_iba` plugin (see `config.yaml`).
 
-Key invariants of the `arcgis` plugin in this fork:
-- **Same tool surface as sibling servers** — `search_datasets`, `get_dataset`, `get_layer_schema`, `get_distinct_values`, `get_aggregations`, `query_data`, `spatial_query_point`, `geocode_address` under the `arcgis__` prefix, identical names/shapes to the Worcester and SANDAG forks.
-- **dataset_id is a services-directory path** — `{folder}/{service}/{MapServer|FeatureServer}/{layerId}`, e.g. `Planning/PLN_LongRangePlanning/MapServer/7` (MHPA). Validated before URL interpolation (security boundary).
-- **WGS84 hard contract** — layers are authored in EPSG:2230 (State Plane CA Zone VI, US survey feet); every query sets `inSR=4326` and `outSR=4326`. Without `inSR`, WGS84 coords are read as State Plane feet and silently match nothing.
-- **Per-layer pagination** — `maxRecordCount` varies by layer and is read from the catalog; `query_data` pages with `resultOffset`/`resultRecordCount`.
-- **Auth-gated services** are detected during the crawl (HTTP 401/403, ArcGIS JSON codes 498/499/403) and recorded in the manifest's `skipped` list; only anonymously queryable layers are indexed.
+Unlike the sibling GIS forks, this one fronts a **single fixed ArcGIS FeatureServer with a known schema** — not a portal or services directory. There is nothing to crawl, so all the catalog-discovery machinery is gone: no `search_datasets`, no `get_aggregations`, no catalog manifest, no dataset-id resolution. Every tool addresses layer 0 (or one of its related tables) directly.
+
+```
+https://services1.arcgis.com/lDFzr3JyGEn5Eymu/arcgis/rest/services/iba_polygons_public/FeatureServer
+  layer 0   iba_polygons_public  -- the main IBA polygon record
+  tables    3 criteria_site   4 criteria_species   5 habitat    6 landuse
+            7 observation     8 ownership          9 site_description
+           10 species        11 threat
+```
+
+Key invariants of the `audubon_iba` plugin:
+
+- **Five tools, no discovery** — `find_ibas_near_point`, `search_ibas`, `get_iba_details`, `get_iba_related_records`, `list_distinct_values`, under the `audubon_iba__` prefix.
+- **WGS84 hard contract** — the polygons are authored in EPSG:3857 (Web Mercator); every query sets `inSR=4326`/`outSR=4326` and lets the service reproject. Without `inSR`, WGS84 coords are read as Web Mercator metres and silently match nothing. `find_ibas_near_point` adds a server-side buffer (`distance` + `units=esriSRUnit_Kilometer`).
+- **Runtime schema introspection** — layer 0's fields, coded-value domains, record cap, and relationship ids are read from the service at runtime (`?f=json`) and cached per instance. Nothing is hardcoded beyond the fields the tools name. Related tables are introspected separately, so their dates/domains decode against *their own* schema.
+- **relationshipId != relatedTableId** — `queryRelatedRecords` takes the relationship's `id` (0–8), not the related table's id (3–11). The plugin resolves the id from live metadata by relationship *name*; hardcoding the number would silently query the wrong table.
+- **site_id is not objectid** — `queryRelatedRecords` keys on the origin layer's `objectid`, so `get_iba_related_records` resolves `site_id -> objectid` first (which doubles as the existence check).
+- **Pagination** — `maxRecordCount` is 2000; both `/query` and `/queryRelatedRecords` page with `resultOffset`/`resultRecordCount`.
+- **No free-form SQL surface** — callers pass values (`state`, `priority`, `flyway`, `name`), never a WHERE clause. Values are quote- and LIKE-wildcard-escaped into fixed predicates, and the composed clause still goes through `WhereValidator` (shared from `plugins/arcgis/where_validator.py`). Field names in `list_distinct_values` are validated against the live schema before interpolation.
+- **Auth-free** — the public service is anonymous. The `token` config key exists only so the same plugin could front a secured mirror.
+
+### The designation caveat (non-negotiable)
+
+An IBA is a science-based conservation **priority** (BirdLife/Audubon criteria, ranked Global / Continental / State in `iba_priority`). It carries **no legal or regulatory force**: it does not protect land, restrict use, or trigger permitting, and its boundaries are advisory rather than authoritative property lines. This is stated in the server-level `instructions` (config.yaml), repeated in tool descriptions, and appended as a footer to list/detail output. Do not weaken it.
+
+`ebird_link` is the key integration point — it pre-joins each IBA to its eBird hotspot/region. For recent or live sightings, surface that link (or chain to an eBird tool) rather than reporting the stale `observation` table.
+
+## Server-level instructions
+
+The MCP `initialize` response carries an `instructions` field, sourced from the top-level `instructions:` key in `config.yaml` and wired through `MCPServer(plugin_manager, config)`. It is where interpretive guardrails live, so they do not have to be repeated in every tool description. `serverInfo.name` comes from `server_name` in the same config (defaulting to `opencontext` when no config is passed).
 
 ## Build & Development Commands
 
@@ -19,33 +43,24 @@ uv sync                              # or: pip install -r requirements.txt
 
 # Run local MCP server (no Lambda needed)
 python3 scripts/local_server.py      # Serves on http://localhost:8000/mcp
-# Or: python3 local_server.py        # Alternate entry point, serves on / and /mcp
+# On Windows, set PYTHONIOENCODING=utf-8 first (the script prints emoji).
 
 # Validate config
 python3 -c "from core.validators import load_and_validate_config; load_and_validate_config('config.yaml')"
 
-# Rebuild the layer catalog (deploy artifact; commit the result and redeploy)
-python3 scripts/crawl_catalog.py
-
-# Smoke test a deployment (or a local server)
+# Smoke test a deployment (or a local server). Ends on the verification
+# queries: a 40km buffer around Anchorage, then a species traversal on a
+# site it returns.
 python3 scripts/smoke_prod.py http://localhost:8000/mcp
 
 # Tests
 uv run pytest tests/ -n auto                                    # All tests, parallel
-uv run pytest tests/test_ckan_plugin.py -v                      # Single file
-uv run pytest tests/test_ckan_plugin.py::TestClass::test_name -v  # Single test
-uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # With coverage (80% minimum)
+uv run pytest tests/test_audubon_iba_plugin.py -v               # This fork's plugin
+uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # 80% minimum
 
 # Linting (ruff)
-uv run ruff check core/ plugins/ server/ tests/      # Check
-uv run ruff check core/ plugins/ server/ tests/ --fix # Auto-fix
-uv run ruff format core/ plugins/ server/ tests/      # Format
-
-# Pre-commit hooks
-pre-commit run --all-files
-
-# Go client (requires Go 1.21+)
-cd client && make build
+uv run ruff check core/ plugins/ server/ tests/ --fix
+uv run ruff format core/ plugins/ server/ tests/
 
 # Deploy to AWS
 ./scripts/deploy.sh --environment staging
@@ -53,7 +68,7 @@ cd client && make build
 
 ## Architecture
 
-**Core rule: One Fork = One MCP Server.** Each deployment runs exactly ONE plugin. This is enforced at config validation time (`core/validators.py`) and at runtime (`PluginManager.load_plugins()`). To deploy multiple MCP servers, fork the repo per plugin.
+**Core rule: One Fork = One MCP Server.** Each deployment runs exactly ONE plugin, enforced at config validation time (`core/validators.py`) and at runtime (`PluginManager.load_plugins()`). This fork runs `audubon_iba`. The other built-in plugins (`ckan`, `arcgis`, `socrata`, `anchorage_gis`) remain in `plugins/` as framework code but are disabled; `plugins/arcgis/catalog.json` is a leftover San Diego crawl artifact and is unused here.
 
 **Request flow:**
 ```
@@ -64,19 +79,17 @@ Claude (stdio) → Go client (client/) or stdio_bridge.py → HTTP POST /mcp
 ```
 
 **Key modules:**
-- `core/interfaces.py` — Abstract bases: `MCPPlugin`, `DataPlugin`, plus `ToolDefinition`, `ToolResult`, `PluginType` enum
-- `core/plugin_manager.py` — Discovers plugins by scanning `plugins/` and `custom_plugins/` for `plugin.py` files. Registers tools with `pluginname__toolname` prefix. Routes `tools/call` to the correct plugin.
-- `core/mcp_server.py` — Handles MCP JSON-RPC methods: `initialize`, `tools/list`, `tools/call`, `ping`
-- `core/validators.py` — Loads config from `config.yaml` (local) or `OPENCONTEXT_CONFIG` env var (Lambda). Enforces single-plugin rule.
-- `server/adapters/aws_lambda.py` — AWS Lambda entry point (handler: `server.adapters.aws_lambda.lambda_handler`). Also `server/lambda_handler.py` as legacy entry point.
+- `core/interfaces.py` — Abstract bases: `MCPPlugin`, `DataPlugin`, plus `ToolDefinition`, `ToolResult`, `PluginType` enum. The IBA plugin implements `MCPPlugin` directly, not `DataPlugin` — it has no dataset/resource concept to satisfy.
+- `core/plugin_manager.py` — Discovers plugins by scanning `plugins/` and `custom_plugins/` for `plugin.py` files. Registers tools with the `pluginname__toolname` prefix. Routes `tools/call` to the correct plugin.
+- `core/mcp_server.py` — Handles MCP JSON-RPC methods: `initialize` (incl. `instructions`), `tools/list`, `tools/call`, `ping`
+- `core/validators.py` — Loads config from `config.yaml` (local) or `OPENCONTEXT_CONFIG` env var (Lambda). Enforces the single-plugin rule.
+- `server/adapters/aws_lambda.py` — AWS Lambda entry point (handler: `server.adapters.aws_lambda.lambda_handler`)
 - `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server
-- `stdio_bridge.py` — Python stdio-to-HTTP bridge for connecting Claude Desktop/Code to the local server (alternative to Go client)
-
-**Built-in plugins** (`plugins/`): `ckan`, `arcgis`, `socrata` — each implements `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`. Custom plugins go in `custom_plugins/` and are auto-discovered.
+- `stdio_bridge.py` — Python stdio-to-HTTP bridge for connecting Claude Desktop/Code to the local server
 
 ## Plugin Development
 
-New plugins must implement `MCPPlugin` (or `DataPlugin` for data sources). Place in `custom_plugins/<name>/plugin.py`. The class must define `plugin_name`, `plugin_type`, `plugin_version` and implement `initialize()`, `shutdown()`, `get_tools()`, `execute_tool()`, `health_check()`. Tool names are auto-prefixed — return bare names from `get_tools()`.
+New plugins must implement `MCPPlugin` (or `DataPlugin` for catalog-style data sources). Place in `custom_plugins/<name>/plugin.py`. The class must define `plugin_name`, `plugin_type`, `plugin_version` and implement `initialize()`, `shutdown()`, `get_tools()`, `execute_tool()`, `health_check()`. Tool names are auto-prefixed — return bare names from `get_tools()`.
 
 ## Configuration
 
