@@ -1,11 +1,14 @@
-"""Production smoke test for the San Diego City GIS MCP server.
+"""Production smoke test for the Audubon Important Bird Areas MCP server.
 
-Exercises the JSON-RPC surface and the core arcgis tool chain end-to-end
-against the deployed Lambda, finishing with the "verification query": a
-WGS84 point-in-polygon on the Multi-Habitat Planning Area (MHPA) at the
-Tijuana River Valley, which must return the containing preserve polygon
-with HABPRES. Read-only; paces calls to stay under the API Gateway rate
-limit (5 rps) and WAF per-IP cap (300/5min).
+Exercises the JSON-RPC surface and the full audubon_iba tool chain
+end-to-end against the deployed Lambda, finishing with the "verification
+query": a point-buffer search around Anchorage (61.17, -149.9, 40 km) that
+must return Alaska IBAs, followed by a related-record traversal that pulls
+one of those sites' species list. Together those two prove the WGS84 buffer
+contract and the site_id -> objectid -> queryRelatedRecords chain.
+
+Read-only; paces calls to stay under the API Gateway rate limit (5 rps) and
+WAF per-IP cap (300/5min).
 
 Usage:
     python3 scripts/smoke_prod.py [URL]
@@ -24,11 +27,15 @@ import urllib.request
 URL = (
     (sys.argv[1] if len(sys.argv) > 1 else None)
     or os.environ.get("OPENCONTEXT_SMOKE_URL")
-    or "https://sandiego-city-gis.codeforanchorage.org/mcp"
+    or "https://audubon-iba.codeforanchorage.org/mcp"
 )
 
-MHPA_ID = "Planning/PLN_LongRangePlanning/MapServer/7"
-ZONES_ID = "Planning/PLN_LongRangePlanning/MapServer/27"
+# Anchorage. Chosen because it sits inside a dense cluster of Alaska IBAs,
+# so a 40 km buffer must return several -- an empty result here means the
+# inSR=4326 contract broke and the point was read as Web Mercator metres.
+ANCHORAGE_LAT = 61.17
+ANCHORAGE_LNG = -149.9
+RADIUS_KM = 40
 
 _id = 0
 results = []
@@ -53,7 +60,7 @@ def rpc(method, params=None):
 
 
 def call_tool(name, args):
-    return rpc("tools/call", {"name": f"arcgis__{name}", "arguments": args})
+    return rpc("tools/call", {"name": f"audubon_iba__{name}", "arguments": args})
 
 
 def text_of(resp):
@@ -75,7 +82,8 @@ try:
 except Exception as e:
     check("ping", False, repr(e))
 
-# 2. initialize
+# 2. initialize -- must carry the server-level instructions, including the
+#    "no legal force" guardrail that keeps IBAs from being read as zoning.
 try:
     r = rpc(
         "initialize",
@@ -85,160 +93,117 @@ try:
             "clientInfo": {"name": "smoke", "version": "1.0"},
         },
     )
-    check("initialize", bool(r["result"]["serverInfo"]["name"]))
+    result = r["result"]
+    instructions = result.get("instructions", "")
+    ok = bool(result["serverInfo"]["name"]) and "NO legal or regulatory" in instructions
+    check("initialize (instructions present)", ok, f"{len(instructions)} chars")
 except Exception as e:
-    check("initialize", False, repr(e))
+    check("initialize (instructions present)", False, repr(e))
 
-# 3. tools/list -- expect the eight arcgis tools (same surface as the
-#    sibling Hub-based servers, so cross-server orchestration keeps working)
+# 3. tools/list -- the five IBA tools, and none of the catalog-discovery
+#    tools the fixed-service design deliberately drops.
 try:
     r = rpc("tools/list")
-    tools = {t["name"]: t for t in r["result"]["tools"]}
+    tools = {t["name"] for t in r["result"]["tools"]}
     expected = {
-        "arcgis__search_datasets",
-        "arcgis__get_dataset",
-        "arcgis__get_aggregations",
-        "arcgis__query_data",
-        "arcgis__get_layer_schema",
-        "arcgis__get_distinct_values",
-        "arcgis__spatial_query_point",
-        "arcgis__geocode_address",
+        "audubon_iba__find_ibas_near_point",
+        "audubon_iba__search_ibas",
+        "audubon_iba__get_iba_details",
+        "audubon_iba__get_iba_related_records",
+        "audubon_iba__list_distinct_values",
     }
-    check("tools/list (8 tools)", set(tools) == expected, f"{sorted(tools)}")
+    check("tools/list (5 tools)", tools == expected, f"{sorted(tools)}")
 except Exception as e:
-    check("tools/list (8 tools)", False, repr(e))
+    check("tools/list (5 tools)", False, repr(e))
 
-# 4. discovery -- search_datasets('MHPA') must resolve to the featured layer
-try:
-    t = text_of(call_tool("search_datasets", {"q": "MHPA", "limit": 5}))
-    check(
-        "search_datasets('MHPA') resolves",
-        MHPA_ID in t and "Multi-Habitat Planning Area" in t,
-        t.split("\n")[0][:60],
-    )
-except Exception as e:
-    check("search_datasets('MHPA') resolves", False, repr(e))
-
-# 5. discovery -- search_datasets('zoning') must surface Base Zones
-try:
-    t = text_of(call_tool("search_datasets", {"q": "zoning", "limit": 5}))
-    check(
-        "search_datasets('zoning') resolves",
-        ZONES_ID in t and "Base Zones" in t,
-        t.split("\n")[0][:60],
-    )
-except Exception as e:
-    check("search_datasets('zoning') resolves", False, repr(e))
-
-# 6. get_dataset on the MHPA path id
-try:
-    t = text_of(call_tool("get_dataset", {"dataset_id": MHPA_ID}))
-    ok = "Multi-Habitat Planning Area" in t and "WGS84" in t
-    check("get_dataset(MHPA)", ok, f"{len(t)} chars")
-except Exception as e:
-    check("get_dataset(MHPA)", False, repr(e))
-
-# 7. get_layer_schema -- field list with the HABPRES field
-try:
-    t = text_of(call_tool("get_layer_schema", {"item_id": MHPA_ID}))
-    ok = "Fields (" in t and "HABPRES" in t
-    check("get_layer_schema(MHPA)", ok, t.split("\n")[0][:60])
-except Exception as e:
-    check("get_layer_schema(MHPA)", False, repr(e))
-
-# 8. query_data -- TOTAL MATCHING count with a where clause
+# 4. VERIFICATION QUERY (1/2) -- point-buffer search around Anchorage.
+site_id = None
 try:
     t = text_of(
         call_tool(
-            "query_data",
-            {
-                "dataset_id": MHPA_ID,
-                "where": "HABPRES >= 90",
-                "out_fields": "SUBAREA,HABPRES,ACRES",
-                "order_by": "ACRES DESC",
-                "limit": 3,
-            },
+            "find_ibas_near_point",
+            {"lat": ANCHORAGE_LAT, "lng": ANCHORAGE_LNG, "radius_km": RADIUS_KM},
         )
     )
-    ok = "TOTAL MATCHING:" in t and "Record 1:" in t and "HABPRES" in t
-    check("query_data where+order_by (TOTAL MATCHING)", ok, t.split("\n")[0][:60])
+    ok = "Anchorage Coastal" in t and "site_id:" in t
+    if ok:
+        # Grab a site_id to traverse in the next step.
+        for line in t.splitlines():
+            if line.strip().startswith("site_id:"):
+                site_id = int(line.split(":")[1].strip())
+                break
+    check(
+        f"verification query 1: find_ibas_near_point({ANCHORAGE_LAT}, "
+        f"{ANCHORAGE_LNG}, {RADIUS_KM}km)",
+        ok and site_id is not None,
+        f"first site_id={site_id}" if ok else "ERROR/empty: " + t[:80],
+    )
 except Exception as e:
-    check("query_data where+order_by (TOTAL MATCHING)", False, repr(e))
+    check("verification query 1: find_ibas_near_point(Anchorage)", False, repr(e))
 
-# 9. VERIFICATION QUERY -- WGS84 point-in-polygon on MHPA at the Tijuana
-#    River Valley (32.5539, -117.0846). This point returns null on the
-#    regional (SANDAG) server's County MSCP_CN layer but sits inside a City
-#    MHPA preserve, so it proves the inSR=4326 contract end-to-end.
+# 5. VERIFICATION QUERY (2/2) -- related-record traversal for that site.
+#    Proves site_id -> objectid resolution and queryRelatedRecords wiring.
 try:
+    if site_id is None:
+        raise RuntimeError("no site_id from the buffer query")
     t = text_of(
         call_tool(
-            "spatial_query_point",
-            {
-                "item_id": MHPA_ID,
-                "lon": -117.0846,
-                "lat": 32.5539,
-                "out_fields": "HABPRES,INHABPRES,SUBAREA,ACRES",
-            },
+            "get_iba_related_records",
+            {"site_id": site_id, "category": "species", "limit": 5},
         )
     )
-    ok = "Record 1:" in t and "HABPRES:" in t
+    ok = "Record 1:" in t and "common_name:" in t
     check(
-        "verification query (MHPA point-in-polygon, WGS84)",
+        f"verification query 2: get_iba_related_records({site_id}, 'species')",
         ok,
-        t.split("\n")[0][:60] if ok else "ERROR/empty: " + t[:80],
+        t.split("\n")[0][:70] if ok else "ERROR/empty: " + t[:80],
     )
 except Exception as e:
-    check("verification query (MHPA point-in-polygon, WGS84)", False, repr(e))
+    check("verification query 2: get_iba_related_records(species)", False, repr(e))
 
-# 10. get_distinct_values -- INHABPRES should include Yes
+# 6. get_iba_details -- ebird_link must be surfaced, it is the integration
+#    point to live sightings.
 try:
-    t = text_of(
-        call_tool(
-            "get_distinct_values",
-            {"item_id": MHPA_ID, "field": "INHABPRES", "limit": 10},
-        )
-    )
-    ok = "Yes" in t and "distinct value" in t
-    check("get_distinct_values(INHABPRES)", ok, t.replace("\n", " ")[:60])
+    t = text_of(call_tool("get_iba_details", {"site_id": site_id or 1004}))
+    ok = "eBird link:" in t and "ebird.org" in t
+    check("get_iba_details (ebird_link surfaced)", ok, t.split("\n")[0][:60])
 except Exception as e:
-    check("get_distinct_values(INHABPRES)", False, repr(e))
+    check("get_iba_details (ebird_link surfaced)", False, repr(e))
 
-# 11. geocode_address -- street address to lon/lat (US Census geocoder).
-#     202 C St is San Diego City Hall (a public landmark used as the demo).
+# 7. search_ibas -- attribute filters + TOTAL MATCHING count
 try:
-    t = text_of(call_tool("geocode_address", {"address": "202 C St"}))
-    ok = "match(es)" in t and "lon:" in t and "lat:" in t
-    check("geocode_address(City Hall)", ok, t.split("\n")[0][:60])
+    t = text_of(call_tool("search_ibas", {"state": "AK", "priority": "Global", "limit": 3}))
+    ok = "TOTAL MATCHING:" in t and "site_id:" in t
+    check("search_ibas(state=AK, priority=Global)", ok, t.split("\n")[0][:60])
 except Exception as e:
-    check("geocode_address(City Hall)", False, repr(e))
+    check("search_ibas(state=AK, priority=Global)", False, repr(e))
 
-# 12. spatial_query_point BY ADDRESS -- geocode + zoning lookup in one call.
-#     Downtown City Hall sits in the Centre City Planned District (CCPD-*).
+# 8. search_ibas -- case-insensitive name LIKE
 try:
-    t = text_of(
-        call_tool(
-            "spatial_query_point",
-            {
-                "item_id": ZONES_ID,
-                "address": "202 C St",
-                "out_fields": "ZONE_NAME",
-                "limit": 2,
-            },
-        )
-    )
-    ok = "Geocoded" in t and "ZONE_NAME" in t
-    check("spatial_query_point(zoning by address)", ok, t.split("\n")[0][:60])
+    t = text_of(call_tool("search_ibas", {"name": "coastal", "limit": 3}))
+    ok = "TOTAL MATCHING:" in t and "Coastal" in t
+    check("search_ibas(name='coastal') case-insensitive", ok, t.split("\n")[0][:60])
 except Exception as e:
-    check("spatial_query_point(zoning by address)", False, repr(e))
+    check("search_ibas(name='coastal') case-insensitive", False, repr(e))
 
-# 13. get_aggregations sanity -- catalog facets by folder
+# 9. list_distinct_values -- the priority enum
 try:
-    t = text_of(call_tool("get_aggregations", {"field": "folder"}))
-    check("get_aggregations(folder)", "Planning" in t, t.replace("\n", " ")[:60])
+    t = text_of(call_tool("list_distinct_values", {"field": "iba_priority"}))
+    ok = "Global" in t and "Continental" in t and "State" in t
+    check("list_distinct_values('iba_priority')", ok, t.split("\n")[0][:60])
 except Exception as e:
-    check("get_aggregations(folder)", False, repr(e))
+    check("list_distinct_values('iba_priority')", False, repr(e))
 
-print("\n=== SUMMARY ===")
-n_pass = sum(results)
-print(f"{n_pass}/{len(results)} checks passed")
-sys.exit(0 if n_pass == len(results) else 1)
+# 10. error path -- an unknown field must be rejected, not silently queried
+try:
+    r = call_tool("list_distinct_values", {"field": "priorty"})
+    ok = r["result"].get("isError") is True
+    check("unknown field rejected", ok, str(r["result"].get("error"))[:60])
+except Exception as e:
+    check("unknown field rejected", False, repr(e))
+
+print()
+passed = sum(1 for r in results if r)
+total = len(results)
+print(f"{passed}/{total} checks passed")
+sys.exit(0 if passed == total else 1)

@@ -87,7 +87,7 @@ async def _initialize_server() -> None:
         await _plugin_manager.load_plugins()
 
         # Initialize MCP Server
-        _mcp_server = MCPServer(_plugin_manager)
+        _mcp_server = MCPServer(_plugin_manager, config)
 
         logger.info("OpenContext MCP server initialized successfully")
 

@@ -40,6 +40,39 @@ class TestInitialize:
         assert "serverInfo" in response["result"]
         assert response["result"]["serverInfo"]["name"] == "opencontext"
         assert response["result"]["serverInfo"]["version"] == "1.0.0"
+        # No config -> no instructions field at all (rather than an empty one)
+        assert "instructions" not in response["result"]
+
+    @pytest.mark.asyncio
+    async def test_initialize_returns_server_name_and_instructions_from_config(self):
+        """Config supplies serverInfo.name and the server-level instructions."""
+        plugin_manager = MagicMock(spec=PluginManager)
+        server = MCPServer(
+            plugin_manager,
+            {
+                "server_name": "Audubon Important Bird Areas",
+                "instructions": "  IBA designation carries no legal force.  ",
+            },
+        )
+
+        request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        response = await server.handle_request(request)
+
+        result = response["result"]
+        assert result["serverInfo"]["name"] == "Audubon Important Bird Areas"
+        assert result["instructions"] == "IBA designation carries no legal force."
+
+    @pytest.mark.asyncio
+    async def test_initialize_omits_blank_instructions(self):
+        """A blank instructions value must not be advertised to clients."""
+        plugin_manager = MagicMock(spec=PluginManager)
+        server = MCPServer(plugin_manager, {"instructions": "   "})
+
+        request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        response = await server.handle_request(request)
+
+        assert "instructions" not in response["result"]
+        assert response["result"]["serverInfo"]["name"] == "opencontext"
 
     @pytest.mark.asyncio
     async def test_initialize_notification_returns_none(self):

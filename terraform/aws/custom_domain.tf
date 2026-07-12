@@ -37,7 +37,7 @@ resource "aws_api_gateway_domain_name" "custom" {
 }
 
 # ── Base Path Mapping ───────────────────────────────────────────────────────
-# Empty base path so sandiego-city-gis.codeforanchorage.org/mcp hits the existing /mcp resource.
+# Empty base path so audubon-iba.codeforanchorage.org/mcp hits the existing /mcp resource.
 
 resource "aws_api_gateway_base_path_mapping" "custom" {
   count       = local.create_custom_domain

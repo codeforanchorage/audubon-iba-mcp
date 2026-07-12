@@ -24,6 +24,20 @@ from core.validators import (
     load_and_validate_config,
 )
 
+
+def _packaged_config_path() -> str:
+    """Path to the config.yaml shipped inside the deployment package.
+
+    On Lambda the package is extracted to ``$LAMBDA_TASK_ROOT`` (/var/task),
+    so resolve relative to that rather than the process CWD; fall back to the
+    CWD for local runs. The full config (including the ``instructions`` block)
+    is delivered as this packaged file rather than the ``OPENCONTEXT_CONFIG``
+    env var, which AWS caps at 4KB.
+    """
+    root = os.environ.get("LAMBDA_TASK_ROOT") or "."
+    return os.path.join(root, "config.yaml")
+
+
 # Configure JSON logging globally (must be called before other loggers are created)
 # Try to get log level from config, but default to INFO if config not available yet
 try:
@@ -34,8 +48,8 @@ try:
         logging_config = get_logging_config(config)
         log_level = logging_config.get("level", "INFO")
     else:
-        # Try loading from config.yaml (for local testing)
-        config = load_and_validate_config("config.yaml")
+        # Fall back to the packaged config.yaml.
+        config = load_and_validate_config(_packaged_config_path())
         logging_config = get_logging_config(config)
         log_level = logging_config.get("level", "INFO")
 except Exception:
@@ -73,10 +87,13 @@ def _load_config() -> Dict[str, Any]:
             logger.error(f"Failed to parse config from environment: {e}")
             raise
 
-    # Fall back to loading from config.yaml (for local testing)
+    # Fall back to the packaged config.yaml. This is the PRIMARY path on
+    # Lambda: the full config (with the server `instructions` block) does not
+    # fit in the 4KB OPENCONTEXT_CONFIG env var, so Terraform sets that to ""
+    # and ships config.yaml inside the deployment package instead.
     try:
-        _config = load_and_validate_config("config.yaml")
-        logger.info("Loaded configuration from config.yaml")
+        _config = load_and_validate_config(_packaged_config_path())
+        logger.info("Loaded configuration from packaged config.yaml")
         return _config
     except FileNotFoundError:
         logger.error(
@@ -107,7 +124,7 @@ async def _initialize_server() -> None:
         await _plugin_manager.load_plugins()
 
         # Initialize MCP Server
-        _mcp_server = MCPServer(_plugin_manager)
+        _mcp_server = MCPServer(_plugin_manager, config)
 
         logger.info("OpenContext MCP server initialized successfully")
 
@@ -146,9 +163,7 @@ class UniversalHTTPHandler:
         logger.info("UniversalHTTPHandler initialized")
 
     @classmethod
-    def _get_cors_headers(
-        cls, request_origin: Optional[str] = None
-    ) -> Dict[str, str]:
+    def _get_cors_headers(cls, request_origin: Optional[str] = None) -> Dict[str, str]:
         """Build CORS response headers, reflecting allowlisted origins.
 
         Args:

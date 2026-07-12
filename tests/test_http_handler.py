@@ -197,10 +197,7 @@ class TestCORS:
             # No Origin sent → default-origin (claude.ai) is reflected.
             assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
             assert headers["Vary"] == "Origin"
-            assert (
-                headers["Access-Control-Allow-Methods"]
-                == "POST, OPTIONS"
-            )
+            assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
             assert (
                 headers["Access-Control-Allow-Headers"]
                 == "content-type, accept, mcp-session-id"
@@ -216,10 +213,7 @@ class TestCORS:
         # No Origin sent → default-origin reflected.
         assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
         assert headers["Vary"] == "Origin"
-        assert (
-            headers["Access-Control-Allow-Methods"]
-            == "POST, OPTIONS"
-        )
+        assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
         assert (
             headers["Access-Control-Allow-Headers"]
             == "content-type, accept, mcp-session-id"
@@ -239,10 +233,7 @@ class TestCORS:
         _status, headers, _body = handler.handle_options(
             request_origin="https://console.anthropic.com"
         )
-        assert (
-            headers["Access-Control-Allow-Origin"]
-            == "https://console.anthropic.com"
-        )
+        assert headers["Access-Control-Allow-Origin"] == "https://console.anthropic.com"
 
     def test_handle_options_falls_back_for_unknown_origin(self):
         """Unknown origins do NOT get reflected — default origin is used."""
@@ -252,10 +243,7 @@ class TestCORS:
             request_origin="https://attacker.example.com"
         )
         assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
-        assert (
-            "attacker.example.com"
-            not in headers["Access-Control-Allow-Origin"]
-        )
+        assert "attacker.example.com" not in headers["Access-Control-Allow-Origin"]
 
 
 class TestSessionID:
@@ -486,7 +474,20 @@ class TestConfigLoading:
             server.http_handler._config = None
 
             _load_config()
-            mock_load.assert_called_once_with("config.yaml")
+            # Config now comes from the config.yaml packaged in the deployment
+            # zip, not the OPENCONTEXT_CONFIG env var (which AWS caps at 4KB).
+            # With LAMBDA_TASK_ROOT unset, that resolves relative to the CWD.
+            mock_load.assert_called_once_with(os.path.join(".", "config.yaml"))
+
+    def test_packaged_config_path_resolves_under_lambda_task_root(self):
+        """On Lambda the package is extracted to $LAMBDA_TASK_ROOT, not the CWD."""
+        from server.http_handler import _packaged_config_path
+
+        with patch.dict(os.environ, {"LAMBDA_TASK_ROOT": "/var/task"}, clear=True):
+            assert _packaged_config_path() == os.path.join("/var/task", "config.yaml")
+
+        with patch.dict(os.environ, {}, clear=True):
+            assert _packaged_config_path() == os.path.join(".", "config.yaml")
 
     def test_load_config_raises_on_invalid_json(self):
         """Test that invalid JSON in environment variable raises error."""
@@ -554,7 +555,9 @@ class TestServerInitialization:
 
             mock_pm_class.assert_called_once_with(config)
             mock_pm.load_plugins.assert_called_once()
-            mock_mcp_class.assert_called_once_with(mock_pm)
+            # Config is passed through so initialize can return server_name
+            # and the server-level `instructions`.
+            mock_mcp_class.assert_called_once_with(mock_pm, config)
 
     @pytest.mark.asyncio
     async def test_initialize_server_reuses_existing_instances(self):
