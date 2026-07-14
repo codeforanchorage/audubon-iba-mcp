@@ -49,12 +49,25 @@ instructions: |
       habitat                              -> ecosystem composition
       observation                          -> historical survey records
       description                          -> narrative site description
-  - `ebird_link` is the key integration point: it pre-joins each IBA to its
-    eBird hotspot/region. When a user wants recent or live sightings, surface
-    that link and chain to an eBird tool if one is available, rather than
-    reporting the stale records in the `observation` table.
   - Absence of a related record means it was never entered, not that the
     attribute does not apply to the site.
+
+  Chaining to eBird — where silent wrong answers come from:
+  - The two datasets share NO keys. `ebird_link` is a human web URL, not an
+    API identifier; the `US-CA_202` inside it is an Audubon id that eBird
+    tools reject. The working bridge is the site's CENTROID plus the
+    `suggested_radius_km` that get_iba_details returns (eBird's 25 km default
+    is metro-scale against a site of a few square km). For "inside the IBA"
+    rather than "near it", use get_iba_boundary and test hotspot coordinates
+    against the polygon.
+  - NEVER pass `species_code` to eBird. Audubon's taxonomy is frozen pre-2014
+    and most of its codes coincide with eBird's — so a stale one fails
+    SILENTLY, returning a plausible "no records" for a species that is really
+    present. (Site 202's "Clapper Rail"/`clarai` is eBird's code for an
+    Atlantic species; the bird there is Ridgway's Rail, `ridrai1`.) Resolve
+    each bird through eBird's taxonomy by scientific name first. Note
+    `sci_name` holds only the epithet — the genus is in `iba_genus`.
+  - Prefer live eBird data over the `observation` table, which is historical.
 
   Data use:
   - The endpoint is public, but Audubon routes formal reuse of the spatial
