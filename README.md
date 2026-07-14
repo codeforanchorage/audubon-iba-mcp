@@ -46,13 +46,21 @@ Pagination is metadata-driven: `maxRecordCount` is read from the service, and bo
 | ---- | ------- |
 | `audubon_iba__find_ibas_near_point` | "Which IBAs are near here?" — buffers a WGS84 `lat`/`lng` by `radius_km` and returns every IBA polygon it intersects |
 | `audubon_iba__search_ibas` | Attribute search: `state` (name **or** two-letter code), `priority` (Global/Continental/State), `flyway`, `name` (case-insensitive substring). Output leads with `TOTAL MATCHING`, so "how many IBAs in X?" needs no paging |
-| `audubon_iba__get_iba_details` | The full polygon record for one `site_id`, leading with `ebird_link` |
+| `audubon_iba__get_iba_details` | The full polygon record for one `site_id`, leading with the centroid + `suggested_radius_km` that bridge to eBird |
 | `audubon_iba__get_iba_related_records` | The tables behind a site, by `category`: `species`, `criteria`, `criteria_species`, `habitat`, `landuse`, `ownership`, `threat`, `observation`, `description` |
+| `audubon_iba__get_iba_boundary` | The site's actual polygon (WGS84 rings + bbox), for when *inside the IBA* has to mean inside rather than near |
 | `audubon_iba__list_distinct_values` | Cheap enum discovery for a field (`flyway`, `iba_priority`, `iba_eba`, `iba_status`, …) so you can filter on an exact value instead of guessing |
 
 **Workflow:** fetch the polygon record first, then pull a related table only when the question needs one — `species`/`criteria` for *why it was designated*, `threat`/`ownership`/`landuse` for *stewardship context*, `habitat` for *ecosystem*, `observation` for *history*.
 
-**`ebird_link` is the integration point.** It pre-joins each IBA to its eBird hotspot/region. For recent or live sightings, surface that link (or chain to an eBird MCP server) rather than reporting the stale `observation` table.
+## Chaining to eBird — read this before you do
+
+The obvious mashup ("which designated species are being seen here right now?") has two traps that return **confident, silently wrong answers**. Both are handled by the server, but only if you use it as intended:
+
+- **Never pass `species_code` to eBird.** Audubon's taxonomy is frozen pre-2014, and *most* of its codes happen to coincide with eBird's — which is exactly what makes the rest dangerous. Site 202 is designated for "Clapper Rail"/`clarai`, but `clarai` is eBird's code for an Atlantic bird absent from California; the bird actually there is Ridgway's Rail (`ridrai1`). eBird answers "no records" and its absence-of-evidence disclaimer makes the zero look real. Resolve every bird through eBird's taxonomy by scientific name first.
+- **`ebird_link` is not a join key.** It is a human-facing web URL; the `US-CA_202` inside it is an Audubon id that every eBird tool rejects. The working bridge is the **centroid** plus the `suggested_radius_km` that `get_iba_details` returns (eBird's 25 km default is metro-scale against a site of a few km²). For a true in-boundary audit rather than a radius, use `get_iba_boundary` and filter hotspot coordinates against the rings.
+
+Full details, including the probed classification of every stale code: **[docs/EBIRD_COMPOSABILITY.md](docs/EBIRD_COMPOSABILITY.md)**.
 
 ## Connect to the server
 
@@ -99,7 +107,7 @@ returns six Alaska IBAs — Anchorage Coastal, Campbell Creek, Goose Bay, Palmer
 
 returns the birds Anchorage Coastal was designated for (Short-billed Dowitcher, Snow Goose, Hudsonian Godwit, Sandhill Crane).
 
-`scripts/smoke_prod.py` runs both plus eight more checks against any deployment:
+`scripts/smoke_prod.py` runs both plus eleven more checks against any deployment — including that species records still carry the eBird taxonomy warning, and that a site whose name contains a SQL keyword (`Union`) is still searchable:
 
 ```bash
 python scripts/smoke_prod.py                             # production
