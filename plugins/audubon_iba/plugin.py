@@ -87,8 +87,11 @@ _CATEGORY_TO_RELATIONSHIP = {
     "site_description": "site_description",
 }
 
-# What each category is good for -- mirrored in the tool description so the
-# model pulls the right table instead of fetching all nine.
+# The nine categories actually advertised, and what each is good for. The
+# map above additionally accepts `criteria_site` / `site_description` as
+# aliases, but they resolve to the same tables as `criteria` / `description`
+# -- advertising all four made an agent pick between byte-identical options.
+# The enum comes from THIS dict, so every offered category has a purpose.
 _CATEGORY_PURPOSE = {
     "species": "the birds the site was designated for",
     "criteria": "which IBA criteria the site meets (site-level)",
@@ -100,6 +103,55 @@ _CATEGORY_PURPOSE = {
     "observation": "historical survey and count records",
     "description": "narrative site description",
 }
+
+# Accepted-but-not-advertised aliases -> the category they really are.
+_CANONICAL_CATEGORY = {
+    "criteria_site": "criteria",
+    "site_description": "description",
+}
+
+# Audubon's species table is frozen at a pre-2014 taxonomy, and its
+# `species_code` is NOT eBird's `speciesCode` namespace -- though most codes
+# coincide, which is exactly what makes this dangerous. Passing an Audubon
+# code straight to eBird can query a DIFFERENT species and return a
+# confident, correct-looking zero.
+_TAXONOMY_WARNING = (
+    "TAXONOMY WARNING -- do NOT pass `species_code` to eBird. These are "
+    "Audubon's codes on a pre-2014 taxonomy, not eBird `speciesCode` values. "
+    "Many coincide with eBird's, so a wrong one fails SILENTLY: eBird returns "
+    "a plausible 'no records' for a species that is really present. Resolve "
+    "each bird through eBird's taxonomy by `scientific_name` (or common name) "
+    "first, then query."
+)
+
+# Splits/lumps since Audubon froze its taxonomy, where the stale code is a
+# VALID eBird code for a DIFFERENT species -- the silent-wrong-answer cases.
+# Keyed by Audubon species_code. This is a curated hint, not an authority:
+# always confirm against eBird's live taxonomy.
+_KNOWN_TAXONOMY_SPLITS = {
+    "clarai": (
+        "Rallus longirostris (Clapper Rail) was split in 2014. 'clarai' is "
+        "eBird's code for Clapper Rail (Rallus crepitans), an Atlantic/Gulf "
+        "species absent from the Pacific coast. On western sites this record "
+        "almost certainly means Ridgway's Rail (Rallus obsoletus, eBird "
+        "'ridrai1'); on Gulf/Atlantic sites 'clarai' is correct."
+    ),
+    "wesscj": (
+        "Western Scrub-Jay was split in 2016 into California Scrub-Jay "
+        "(eBird 'cowscj1') and Woodhouse's Scrub-Jay ('woscj2')."
+    ),
+    "sagspa1": (
+        "Sage Sparrow was split in 2013 into Bell's Sparrow (eBird "
+        "'belspa2') and Sagebrush Sparrow ('sagspa1')."
+    ),
+    "sagspa": (
+        "Sage Sparrow was split in 2013 into Bell's Sparrow (eBird "
+        "'belspa2') and Sagebrush Sparrow ('sagspa1')."
+    ),
+}
+
+# Acre -> square kilometre.
+_SQ_KM_PER_ACRE = 0.00404685642
 
 # Editor-tracking and geometry-bookkeeping columns. Real fields, but noise
 # in a conversational answer -- suppressed from formatted output.
@@ -206,7 +258,9 @@ class AudubonIBAPlugin(MCPPlugin):
     # ── Tool definitions ────────────────────────────────────────────────
 
     def get_tools(self) -> List[ToolDefinition]:
-        categories = sorted(set(_CATEGORY_TO_RELATIONSHIP))
+        # Advertise only the canonical nine; the aliases still resolve, they
+        # just are not offered as choices.
+        categories = sorted(_CATEGORY_PURPOSE)
         category_help = "; ".join(
             f"'{name}' = {purpose}" for name, purpose in _CATEGORY_PURPOSE.items()
         )
@@ -319,11 +373,15 @@ class AudubonIBAPlugin(MCPPlugin):
                 description=(
                     "Get the full polygon record for one IBA by site_id -- "
                     "name, state, priority rank, status, flyway, area, "
-                    "elevation, chapter contacts, and `ebird_link`. Start here "
-                    "for any question about a specific site, then pull related "
-                    "tables with get_iba_related_records only if the question "
-                    "needs them. `ebird_link` pre-joins the site to its eBird "
-                    "hotspot/region and is the way to get live sightings."
+                    "elevation, chapter contacts. Start here for any question "
+                    "about a specific site, then pull related tables with "
+                    "get_iba_related_records only if the question needs them. "
+                    "Also returns the centroid and a site-sized "
+                    "`suggested_radius_km`, which together are the ONLY working "
+                    "bridge to eBird: eBird cannot address an IBA by id. "
+                    "`ebird_link` is a human-facing web URL, NOT an API "
+                    "identifier -- do not pass it, or the 'US-CA_202' inside "
+                    "it, to any eBird tool."
                 ),
                 input_schema={
                     "type": "object",
@@ -348,8 +406,9 @@ class AudubonIBAPlugin(MCPPlugin):
                     f"needs: {category_help}. Fetch the polygon with "
                     "get_iba_details first; only pull a related table when the "
                     "question calls for it. For recent or live bird sightings, "
-                    "prefer the site's `ebird_link` (or an eBird tool) over the "
-                    "'observation' table, whose records are historical."
+                    "use an eBird tool at the site's centroid over the "
+                    "'observation' table, whose records are historical. "
+                    + _TAXONOMY_WARNING
                 ),
                 input_schema={
                     "type": "object",
@@ -372,6 +431,38 @@ class AudubonIBAPlugin(MCPPlugin):
                         },
                     },
                     "required": ["site_id", "category"],
+                },
+            ),
+            ToolDefinition(
+                name="get_iba_boundary",
+                description=(
+                    "Get one IBA's actual polygon boundary (WGS84 rings) plus "
+                    "its bounding box. Use this when 'inside the IBA' has to "
+                    "mean inside, not near: IBAs are estuaries, river channels "
+                    "and ridgelines, so a radius around the centroid both "
+                    "over-includes neighbouring land and misses the far ends of "
+                    "the site. Test eBird hotspot coordinates against these "
+                    "rings for a true in-boundary audit. Boundaries are "
+                    "advisory, not authoritative property lines."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "site_id": {
+                            "type": "number",
+                            "description": "IBA site_id, e.g. 202.",
+                        },
+                        "simplify": {
+                            "type": "boolean",
+                            "description": (
+                                "Simplify the outline server-side (default: "
+                                "true). Keeps the vertex count manageable; set "
+                                "false for full precision."
+                            ),
+                            "default": True,
+                        },
+                    },
+                    "required": ["site_id"],
                 },
             ),
             ToolDefinition(
@@ -419,6 +510,8 @@ class AudubonIBAPlugin(MCPPlugin):
                 text = await self._tool_details(arguments)
             elif tool_name == "get_iba_related_records":
                 text = await self._tool_related(arguments)
+            elif tool_name == "get_iba_boundary":
+                text = await self._tool_boundary(arguments)
             elif tool_name == "list_distinct_values":
                 text = await self._tool_distinct(arguments)
             else:
@@ -509,6 +602,9 @@ class AudubonIBAPlugin(MCPPlugin):
         site_name, records, table_id = await self.get_iba_related_records(
             site_id, category, limit
         )
+        # An alias ('criteria_site') still resolves, but describe it as the
+        # canonical category it actually is.
+        category = _CANONICAL_CATEGORY.get(category, category)
         label = _CATEGORY_PURPOSE.get(category, category)
         header = (
             f"{category} records for {site_name} (site_id "
@@ -523,12 +619,67 @@ class AudubonIBAPlugin(MCPPlugin):
 
         lines = [header, f"Returned {len(records)} record(s) (limit: {limit}):", ""]
         lines.append(await self._format_records(records, table_id))
+
+        if category == "species":
+            lines.append(_TAXONOMY_WARNING)
+            splits = _split_notes(records)
+            if splits:
+                lines.append("")
+                lines.append(
+                    "Known taxonomy changes affecting this site's designated "
+                    "species (confirm against eBird's live taxonomy):"
+                )
+                lines.extend(f"  - {note}" for note in splits)
         if category == "observation":
             lines.append(
                 "Note: these are historical survey records. For recent or live "
-                "sightings, use the site's ebird_link (get_iba_details) or an "
-                "eBird tool."
+                "sightings, query an eBird tool at the site's centroid "
+                "(get_iba_details)."
             )
+        return "\n".join(lines)
+
+    async def _tool_boundary(self, args: Dict[str, Any]) -> str:
+        site_id = _validate_site_id(args.get("site_id"))
+        simplify = args.get("simplify", True)
+
+        result = await self.get_iba_boundary(site_id, simplify=bool(simplify))
+        if result is None:
+            return (
+                f"No IBA found with site_id {_fmt_number(site_id)}. Find a valid "
+                f"site_id with search_ibas or find_ibas_near_point."
+            )
+        name, rings, bbox = result
+        if not rings:
+            return (
+                f"{name} (site_id {_fmt_number(site_id)}) has no polygon geometry "
+                f"in the service."
+            )
+
+        vertices = sum(len(r) for r in rings)
+        lines = [
+            f"Boundary of {name} (site_id {_fmt_number(site_id)}):",
+            "",
+            "Bounding box (WGS84): "
+            f"west {bbox[0]:.6f}, south {bbox[1]:.6f}, "
+            f"east {bbox[2]:.6f}, north {bbox[3]:.6f}",
+            f"{len(rings)} ring(s), {vertices} vertices"
+            + (" (simplified)" if simplify else " (full precision)"),
+            "",
+            "Rings as [lng, lat] pairs, WGS84. A point is inside the IBA if it "
+            "falls inside an outer ring and outside any hole:",
+        ]
+        for i, ring in enumerate(rings, 1):
+            coords = ", ".join(f"[{x:.6f}, {y:.6f}]" for x, y in ring)
+            lines.append(f"  Ring {i} ({len(ring)} vertices): [{coords}]")
+        lines.append("")
+        lines.append(
+            "To audit eBird coverage of this site: fetch hotspots over the "
+            "bounding box (get_nearby_hotspots at the centroid with a radius "
+            "that covers it), then keep only those whose coordinates fall "
+            "inside these rings. A centroid radius alone is NOT the boundary."
+        )
+        lines.append("")
+        lines.append(self._advisory_footer())
         return "\n".join(lines)
 
     async def _tool_distinct(self, args: Dict[str, Any]) -> str:
@@ -647,6 +798,57 @@ class AudubonIBAPlugin(MCPPlugin):
             offset += len(page)
 
         return site_name, records[:limit], related_table_id
+
+    async def get_iba_boundary(
+        self, site_id: float, simplify: bool = True
+    ) -> Optional[Tuple[str, List[List[Tuple[float, float]]], Tuple[float, ...]]]:
+        """The WGS84 polygon rings and bbox for one site, or None if absent.
+
+        The shared pager sends ``returnGeometry=false`` (every other tool wants
+        attributes only), so geometry gets its own request. ``maxAllowableOffset``
+        simplifies server-side -- an IBA can carry thousands of vertices, and the
+        Douglas-Peucker tolerance is in the OUTPUT SR's units, i.e. degrees here.
+        """
+        params = {
+            "where": f"site_id = {_fmt_number(site_id)}",
+            "outFields": "site_name",
+            "returnGeometry": "true",
+            "geometryPrecision": 6,
+            "inSR": 4326,
+            "outSR": 4326,
+            "resultRecordCount": 1,
+            "f": "json",
+        }
+        if simplify:
+            # ~0.0001 deg =~ 11 m: well inside the service's own "Good" (+/- 3)
+            # boundary accuracy, so this discards noise, not signal.
+            params["maxAllowableOffset"] = 0.0001
+
+        data = await self._get_json(f"{self._layer_url}/query", params)
+        features = data.get("features") or []
+        if not features:
+            return None
+
+        feature = features[0]
+        name = (feature.get("attributes") or {}).get("site_name") or "(unnamed site)"
+        raw_rings = (feature.get("geometry") or {}).get("rings") or []
+
+        rings: List[List[Tuple[float, float]]] = []
+        xs: List[float] = []
+        ys: List[float] = []
+        for raw_ring in raw_rings:
+            ring = [
+                (float(pt[0]), float(pt[1]))
+                for pt in raw_ring
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2
+            ]
+            if ring:
+                rings.append(ring)
+                xs.extend(x for x, _ in ring)
+                ys.extend(y for _, y in ring)
+
+        bbox = (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
+        return name, rings, bbox
 
     async def list_distinct_values(self, field: str, limit: int = 200) -> List[Any]:
         """Distinct values of one layer-0 field."""
@@ -1003,13 +1205,38 @@ class AudubonIBAPlugin(MCPPlugin):
             "",
         ]
 
-        # ebird_link is the integration point to live sightings -- lead with
-        # it rather than burying it in the field dump below.
-        if record.get("ebird_link"):
-            lines.append(f"eBird link: {record['ebird_link']}")
+        # The centroid + a site-sized radius is the only bridge to eBird that
+        # actually works: eBird has no notion of an IBA id, and the ebird_link
+        # below is a human web URL. Spell the chain out so an agent does not
+        # have to infer it -- and does not fall back to eBird's 25 km default,
+        # which is metro-scale against a site of a few square kilometres.
+        lat = record.get("latitude")
+        lng = record.get("longitude")
+        radius_km = _suggested_radius_km(record.get("acres"))
+        if lat is not None and lng is not None:
+            lines.append("eBird bridge (centroid -- IBAs have no eBird id):")
+            lines.append(f"  lat: {_fmt_number(lat)}, lng: {_fmt_number(lng)}")
+            if radius_km:
+                lines.append(
+                    f"  suggested_radius_km: {_fmt_number(radius_km)} "
+                    f"(equal-area circle for this site; eBird's 25 km default "
+                    f"would scan a whole metro)"
+                )
             lines.append(
-                "  (pre-joins this IBA to its eBird hotspot/region -- use this, "
-                "or an eBird tool, for recent sightings.)"
+                "  Chain: get_nearby_hotspots(lat, lng, dist=suggested_radius_km) "
+                "-> get_recent_observations(locId) per hotspot. For a true "
+                "in-boundary audit rather than a radius, use get_iba_boundary "
+                "and filter hotspots to the polygon."
+            )
+            lines.append("")
+
+        if record.get("ebird_link"):
+            lines.append(f"eBird link (for humans): {record['ebird_link']}")
+            lines.append(
+                "  (Opens this IBA in eBird's web Explore tool. It is NOT an "
+                "API identifier -- the 'US-CA_202'-style id inside it is an "
+                "Audubon IBA code, not an eBird regionCode or hotspot locId, "
+                "and eBird tools will reject it. Use the centroid above.)"
             )
             lines.append("")
 
@@ -1037,6 +1264,15 @@ class AudubonIBAPlugin(MCPPlugin):
         for i, raw in enumerate(records, 1):
             record = await self._decode_record(raw, table_id)
             lines.append(f"Record {i}:")
+
+            # `sci_name` holds only the species epithet ('longirostris'); the
+            # genus lives in `iba_genus`. Read alone it is half a name, so
+            # compose the binomial rather than leaving every consumer to
+            # rediscover the split. Raw fields stay for provenance.
+            binomial = _compose_binomial(record)
+            if binomial:
+                lines.append(f"  scientific_name: {binomial}")
+
             for key, value in record.items():
                 if key in _NOISE_FIELDS:
                     continue
@@ -1060,6 +1296,53 @@ class AudubonIBAPlugin(MCPPlugin):
 
 
 # ── Module-level helpers ────────────────────────────────────────────────
+
+
+def _compose_binomial(record: Dict[str, Any]) -> str:
+    """Rebuild 'Genus epithet' from a species record's split-apart fields.
+
+    Returns '' unless both halves are present. Note the result may still be
+    STALE taxonomy (Rallus longirostris was split into obsoletus/crepitans),
+    so it is a lookup key for eBird's taxonomy, not an authority.
+    """
+    genus = str(record.get("iba_genus") or "").strip()
+    epithet = str(record.get("sci_name") or "").strip()
+    if not genus or not epithet:
+        return ""
+    return f"{genus} {epithet}"
+
+
+def _split_notes(records: List[Dict[str, Any]]) -> List[str]:
+    """Curated split/lump notes for the species codes present in a result set."""
+    notes = []
+    for record in records:
+        code = str(record.get("species_code") or "").strip().lower()
+        note = _KNOWN_TAXONOMY_SPLITS.get(code)
+        if note:
+            name = record.get("common_name") or code
+            entry = f"{name} (species_code '{code}'): {note}"
+            if entry not in notes:
+                notes.append(entry)
+    return notes
+
+
+def _suggested_radius_km(acres: Any) -> Optional[float]:
+    """Radius of the circle with the same area as the site, in km.
+
+    An IBA is a few square kilometres; eBird's nearby tools default to a 25 km
+    radius, which for a site like Mission Bay over-scans by ~160x and drags in
+    inland hotspots that are nowhere near it. This gives an agent a site-sized
+    number instead of a guessed constant. Still a circle, so it is an
+    approximation -- get_iba_boundary is the exact answer.
+    """
+    if acres is None or isinstance(acres, bool) or not isinstance(acres, (int, float)):
+        return None
+    if acres <= 0 or math.isnan(acres) or math.isinf(acres):
+        return None
+    radius = math.sqrt((acres * _SQ_KM_PER_ACRE) / math.pi)
+    # eBird's nearby radius maxes out at 50 km; never suggest past it. Floor at
+    # 1 km so a tiny site still returns a usable query.
+    return round(min(max(radius, 1.0), 50.0), 1)
 
 
 def _validate_where(where: str) -> str:

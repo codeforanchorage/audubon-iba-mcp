@@ -20,8 +20,10 @@ from core.interfaces import PluginType
 from plugins.audubon_iba.config_schema import AudubonIBAPluginConfig
 from plugins.audubon_iba.plugin import (
     AudubonIBAPlugin,
+    _compose_binomial,
     _escape_like,
     _fmt_number,
+    _suggested_radius_km,
     _validate_site_id,
 )
 
@@ -76,6 +78,7 @@ LAYER0_META = {
         # confusing the two is the bug these tests exist to catch.
         {"id": 7, "name": "species", "relatedTableId": 10},
         {"id": 3, "name": "threat", "relatedTableId": 11},
+        {"id": 0, "name": "criteria_site", "relatedTableId": 3},
     ],
 }
 
@@ -88,10 +91,24 @@ TABLE10_META = {
         {"name": "objectid", "type": "esriFieldTypeOID"},
         {"name": "site_id", "type": "esriFieldTypeDouble"},
         {"name": "common_name", "type": "esriFieldTypeString"},
+        {"name": "species_code", "type": "esriFieldTypeString"},
+        # The binomial arrives split apart: epithet here, genus in iba_genus.
         {"name": "sci_name", "type": "esriFieldTypeString"},
+        {"name": "iba_genus", "type": "esriFieldTypeString"},
         {"name": "assessment_dt", "type": "esriFieldTypeDate"},
         {"name": "globalid", "type": "esriFieldTypeGlobalID"},
     ],
+}
+
+# The real site-202 record: Audubon's frozen taxonomy still calls the western
+# rail "Clapper Rail" / clarai, which is eBird's code for a DIFFERENT species.
+CLAPPER_RAIL = {
+    "objectid": 7801,
+    "site_id": 202.0,
+    "species_code": "clarai",
+    "sci_name": "longirostris",
+    "iba_genus": "Rallus",
+    "common_name": "Clapper Rail",
 }
 
 # Any other related table (threat, observation, ...) -- these tests only
@@ -134,6 +151,8 @@ class FakeService:
         self.count = 1
         self.related_pages = []
         self.error = None  # ArcGIS-style error body to return from /query
+        # Rings returned when a caller asks for geometry (get_iba_boundary).
+        self.rings = None
 
     def response(self, payload, status=200):
         request = httpx.Request("GET", "https://example.com")
@@ -168,6 +187,19 @@ class FakeService:
                 return self.response({"error": self.error})
             if params.get("returnCountOnly") == "true":
                 return self.response({"count": self.count})
+            if params.get("returnGeometry") == "true":
+                if self.rings is None:
+                    return self.response({"features": []})
+                return self.response(
+                    {
+                        "features": [
+                            {
+                                "attributes": {"site_name": "Mission Bay"},
+                                "geometry": {"rings": self.rings},
+                            }
+                        ]
+                    }
+                )
             page = self.query_pages.pop(0) if self.query_pages else []
             return self.response({"features": [{"attributes": a} for a in page]})
         raise AssertionError(f"Unexpected URL: {url}")
@@ -235,13 +267,14 @@ class TestToolSurface:
         assert p.plugin_name == "audubon_iba"
         assert p.plugin_type == PluginType.OPEN_DATA
 
-    async def test_exposes_exactly_the_five_iba_tools(self, plugin):
+    async def test_exposes_exactly_the_iba_tools(self, plugin):
         names = {t.name for t in plugin.get_tools()}
         assert names == {
             "find_ibas_near_point",
             "search_ibas",
             "get_iba_details",
             "get_iba_related_records",
+            "get_iba_boundary",
             "list_distinct_values",
         }
 
@@ -261,6 +294,40 @@ class TestToolSurface:
         )
         enum = set(tool.input_schema["properties"]["category"]["enum"])
         assert {"species", "criteria", "habitat", "threat", "description"} <= enum
+
+    async def test_duplicate_categories_are_not_advertised(self, plugin):
+        """criteria_site == criteria and site_description == description
+        returned byte-identical output; offering both made an agent guess."""
+        tool = next(
+            t for t in plugin.get_tools() if t.name == "get_iba_related_records"
+        )
+        enum = tool.input_schema["properties"]["category"]["enum"]
+        assert "criteria_site" not in enum
+        assert "site_description" not in enum
+        assert len(enum) == 9
+
+    async def test_every_advertised_category_is_described(self, plugin):
+        """The aliases shipped with no description -- they echoed their own
+        name. Whatever is offered must be explained."""
+        tool = next(
+            t for t in plugin.get_tools() if t.name == "get_iba_related_records"
+        )
+        description = tool.description
+        for category in tool.input_schema["properties"]["category"]["enum"]:
+            assert f"'{category}' =" in description
+
+    async def test_alias_categories_still_resolve(self, plugin, service):
+        """Dropped from the enum, but not broken for existing callers."""
+        service.query_pages = [[{"objectid": 897, "site_name": "X"}]]
+        service.related_pages = [[{"objectid": 1}]]
+        result = await call(
+            plugin,
+            "get_iba_related_records",
+            {"site_id": 1004, "category": "criteria_site"},
+        )
+        assert result.success is True
+        # ...and it reports itself as the canonical category, with its purpose.
+        assert "criteria records for" in result.content[0]["text"]
 
     async def test_unknown_tool_is_an_error(self, plugin):
         result = await call(plugin, "nope", {})
@@ -424,14 +491,15 @@ class TestGetDetails:
         await call(plugin, "get_iba_details", {"site_id": 1004})
         assert service.query_params()[0]["where"] == "site_id = 1004"
 
-    async def test_surfaces_ebird_link_prominently(self, plugin, service):
+    async def test_surfaces_the_ebird_bridge_prominently(self, plugin, service):
+        """The centroid is the only working route to eBird, so it leads --
+        above the field dump, not buried in it."""
         service.query_pages = [[ANCHORAGE_COASTAL]]
         result = await call(plugin, "get_iba_details", {"site_id": 1004})
         text = result.content[0]["text"]
-        ebird_pos = text.index("eBird link:")
+        bridge_pos = text.index("eBird bridge")
         record_pos = text.index("Full record:")
-        assert ebird_pos < record_pos  # above the field dump, not buried in it
-        assert "recent sightings" in text
+        assert bridge_pos < record_pos
 
     async def test_suppresses_editor_tracking_noise(self, plugin, service):
         service.query_pages = [[ANCHORAGE_COASTAL]]
@@ -526,7 +594,8 @@ class TestRelatedRecords:
             )
             text = result.content[0]["text"]
             assert "historical" in text
-            assert "ebird_link" in text
+            # Point at the centroid, not at ebird_link -- which eBird rejects.
+            assert "centroid" in text
         finally:
             LAYER0_META["relationships"].pop()
 
@@ -577,6 +646,128 @@ class TestRelatedRecords:
         assert calls[1]["resultOffset"] == 2
         text = result.content[0]["text"]
         assert "Returned 3 record(s)" in text
+
+
+# ── Cross-server composability with eBird ───────────────────────────────
+
+
+class TestEBirdBridge:
+    """The seam with the eBird MCP server, where wrong answers were silent.
+
+    Audubon's species codes are NOT eBird's, and its ebird_link is not an API
+    identifier -- but both look like they are, so a naive chain produced
+    confident, correct-looking zeroes.
+    """
+
+    async def test_species_records_warn_codes_are_not_ebird_codes(
+        self, plugin, service
+    ):
+        service.query_pages = [[{"objectid": 897, "site_name": "Mission Bay"}]]
+        service.related_pages = [[CLAPPER_RAIL]]
+        result = await call(
+            plugin, "get_iba_related_records", {"site_id": 202, "category": "species"}
+        )
+        text = result.content[0]["text"]
+        assert "do NOT pass `species_code` to eBird" in text
+        assert "SILENTLY" in text
+
+    async def test_known_split_is_called_out_by_name(self, plugin, service):
+        """The flagship failure: 'clarai' is a valid eBird code for an
+        Atlantic species, so eBird answers 'no records' for a rail that is
+        present. Name the successor rather than let the zero stand."""
+        service.query_pages = [[{"objectid": 897, "site_name": "Mission Bay"}]]
+        service.related_pages = [[CLAPPER_RAIL]]
+        result = await call(
+            plugin, "get_iba_related_records", {"site_id": 202, "category": "species"}
+        )
+        text = result.content[0]["text"]
+        assert "ridrai1" in text
+        assert "Ridgway's Rail" in text
+
+    async def test_species_record_composes_the_binomial(self, plugin, service):
+        """sci_name is a bare epithet; the genus lives in iba_genus. Read
+        alone, sci_name is half a name and a crosswalk keyed on it mismatches."""
+        service.query_pages = [[{"objectid": 897, "site_name": "Mission Bay"}]]
+        service.related_pages = [[CLAPPER_RAIL]]
+        result = await call(
+            plugin, "get_iba_related_records", {"site_id": 202, "category": "species"}
+        )
+        text = result.content[0]["text"]
+        assert "scientific_name: Rallus longirostris" in text
+        # raw fields kept for provenance
+        assert "sci_name: longirostris" in text
+        assert "iba_genus: Rallus" in text
+
+    async def test_details_emit_a_site_sized_radius(self, plugin, service):
+        """eBird's nearby default is 25 km; Mission Bay is ~12 km2, so an
+        equal-area circle is ~2 km. Give the agent the number."""
+        service.query_pages = [
+            [dict(ANCHORAGE_COASTAL, site_id=202, acres=2970.01334296)]
+        ]
+        result = await call(plugin, "get_iba_details", {"site_id": 202})
+        text = result.content[0]["text"]
+        assert "suggested_radius_km: 2" in text
+
+    async def test_details_route_to_ebird_via_the_centroid(self, plugin, service):
+        service.query_pages = [[ANCHORAGE_COASTAL]]
+        result = await call(plugin, "get_iba_details", {"site_id": 1004})
+        text = result.content[0]["text"]
+        assert "get_nearby_hotspots" in text
+        assert "61.125" in text and "-149.977005" in text
+
+    async def test_ebird_link_is_not_sold_as_an_api_identifier(self, plugin, service):
+        """The link is a human 'GuideMe' URL; the US-CA_202 inside it is an
+        Audubon id that every eBird tool rejects."""
+        service.query_pages = [[ANCHORAGE_COASTAL]]
+        result = await call(plugin, "get_iba_details", {"site_id": 1004})
+        text = result.content[0]["text"]
+        assert "for humans" in text
+        assert "NOT an API identifier" in text
+        # the old claim is gone
+        assert "pre-joins this IBA to its eBird hotspot/region" not in text
+
+
+# ── get_iba_boundary ────────────────────────────────────────────────────
+
+
+class TestBoundary:
+    SQUARE = [[[-117.25, 32.75], [-117.20, 32.75], [-117.20, 32.80], [-117.25, 32.80]]]
+
+    async def test_returns_wgs84_rings_and_bbox(self, plugin, service):
+        service.rings = self.SQUARE
+        result = await call(plugin, "get_iba_boundary", {"site_id": 202})
+        assert result.success is True
+        text = result.content[0]["text"]
+        assert "west -117.250000" in text
+        assert "north 32.800000" in text
+        assert "1 ring(s), 4 vertices" in text
+
+        params = service.query_params()[0]
+        assert params["returnGeometry"] == "true"
+        assert params["outSR"] == 4326
+        assert params["maxAllowableOffset"] == 0.0001
+
+    async def test_full_precision_when_simplify_false(self, plugin, service):
+        service.rings = self.SQUARE
+        await call(plugin, "get_iba_boundary", {"site_id": 202, "simplify": False})
+        assert "maxAllowableOffset" not in service.query_params()[0]
+
+    async def test_explains_that_a_radius_is_not_the_boundary(self, plugin, service):
+        service.rings = self.SQUARE
+        result = await call(plugin, "get_iba_boundary", {"site_id": 202})
+        assert (
+            "A centroid radius alone is NOT the boundary" in (result.content[0]["text"])
+        )
+
+    async def test_missing_site_says_so(self, plugin, service):
+        service.rings = None
+        result = await call(plugin, "get_iba_boundary", {"site_id": 99999})
+        assert result.success is True
+        assert "No IBA found" in result.content[0]["text"]
+
+    async def test_bad_site_id_rejected(self, plugin):
+        result = await call(plugin, "get_iba_boundary", {"site_id": "abc"})
+        assert result.success is False
 
 
 # ── list_distinct_values ────────────────────────────────────────────────
@@ -718,6 +909,29 @@ class TestHelpers:
     )
     def test_fmt_number(self, value, expected):
         assert _fmt_number(value) == expected
+
+    def test_compose_binomial(self):
+        assert (
+            _compose_binomial({"iba_genus": "Rallus", "sci_name": "longirostris"})
+            == "Rallus longirostris"
+        )
+        # Half a name is no name -- don't emit a misleading partial.
+        assert _compose_binomial({"sci_name": "longirostris"}) == ""
+        assert _compose_binomial({"iba_genus": "Rallus"}) == ""
+
+    @pytest.mark.parametrize(
+        "acres,expected",
+        [
+            (2970.01334296, 2.0),  # Mission Bay: ~12 km2 -> ~1.96 km
+            (None, None),
+            (0, None),
+            (-5, None),
+            (1, 1.0),  # tiny site still gets a usable radius
+            (10_000_000, 50.0),  # capped at eBird's max nearby radius
+        ],
+    )
+    def test_suggested_radius_km(self, acres, expected):
+        assert _suggested_radius_km(acres) == expected
 
     def test_escape_like(self):
         assert _escape_like("100%") == "100\\%"
