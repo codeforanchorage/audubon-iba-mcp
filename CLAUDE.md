@@ -16,7 +16,8 @@ https://services1.arcgis.com/lDFzr3JyGEn5Eymu/arcgis/rest/services/iba_polygons_
 
 Key invariants of the `audubon_iba` plugin:
 
-- **Five tools, no discovery** — `find_ibas_near_point`, `search_ibas`, `get_iba_details`, `get_iba_related_records`, `list_distinct_values`, under the `audubon_iba__` prefix.
+- **Six tools, no discovery** — `find_ibas_near_point`, `search_ibas`, `get_iba_details`, `get_iba_related_records`, `get_iba_boundary`, `list_distinct_values`, under the `audubon_iba__` prefix.
+- **Geometry is opt-in** — every tool but `get_iba_boundary` sends `returnGeometry=false`, so the shared pager (`_query_layer_paged`) hardcodes it. `get_iba_boundary` has its own request path and simplifies server-side with `maxAllowableOffset` (in *degrees*, since `outSR=4326`).
 - **WGS84 hard contract** — the polygons are authored in EPSG:3857 (Web Mercator); every query sets `inSR=4326`/`outSR=4326` and lets the service reproject. Without `inSR`, WGS84 coords are read as Web Mercator metres and silently match nothing. `find_ibas_near_point` adds a server-side buffer (`distance` + `units=esriSRUnit_Kilometer`).
 - **Runtime schema introspection** — layer 0's fields, coded-value domains, record cap, and relationship ids are read from the service at runtime (`?f=json`) and cached per instance. Nothing is hardcoded beyond the fields the tools name. Related tables are introspected separately, so their dates/domains decode against *their own* schema.
 - **relationshipId != relatedTableId** — `queryRelatedRecords` takes the relationship's `id` (0–8), not the related table's id (3–11). The plugin resolves the id from live metadata by relationship *name*; hardcoding the number would silently query the wrong table.
@@ -29,7 +30,15 @@ Key invariants of the `audubon_iba` plugin:
 
 An IBA is a science-based conservation **priority** (BirdLife/Audubon criteria, ranked Global / Continental / State in `iba_priority`). It carries **no legal or regulatory force**: it does not protect land, restrict use, or trigger permitting, and its boundaries are advisory rather than authoritative property lines. This is stated in the server-level `instructions` (config.yaml), repeated in tool descriptions, and appended as a footer to list/detail output. Do not weaken it.
 
-`ebird_link` is the key integration point — it pre-joins each IBA to its eBird hotspot/region. For recent or live sightings, surface that link (or chain to an eBird tool) rather than reporting the stale `observation` table.
+### Composing with the eBird MCP server (the silent-failure seam)
+
+The two servers are meant to chain — find an IBA, then pull live sightings — but they share **no keys**, and the places where they look like they do are where wrong answers come out silently. Verified against Mission Bay (`site_id` 202) on 2026-07-13.
+
+- **`species_code` is NOT eBird's `speciesCode`.** Audubon's species table is frozen at a pre-2014 taxonomy. Most of its codes happen to coincide with eBird's (`brant`, `marwre`, `savspa`), which is precisely what makes the rest dangerous. Site 202 is designated for "Clapper Rail"/`clarai` — but `clarai` is eBird's code for *Rallus crepitans*, an Atlantic/Gulf bird absent from California. The western population was split off as Ridgway's Rail (`ridrai1`) in 2014. Passing the code straight through queries a **different species** and returns a plausible "no records" for a rail that is present. Resolve by scientific name against eBird's live taxonomy; `_KNOWN_TAXONOMY_SPLITS` carries curated notes for the landmines, and is a hint, not an authority.
+- **`sci_name` is only the epithet** (`longirostris`); the genus is in `iba_genus`. `_compose_binomial` rebuilds the whole name — which may itself be stale taxonomy, so it is a lookup key for eBird, not the answer.
+- **`ebird_link` is not a join key.** It is a human-facing GuideMe URL, and the `US-CA_202` inside it is an Audubon IBA id that every eBird tool rejects. Do not sell it as an API identifier.
+- **The centroid is the only bridge that works.** `get_iba_details` emits `lat`/`lng` plus a `suggested_radius_km` (equal-area circle from `acres`) because eBird's nearby default of 25 km is metro-scale — against Mission Bay's ~12 km² it over-scans ~160×. For a true in-boundary audit rather than a radius, use `get_iba_boundary` and filter hotspot coordinates against the rings.
+- Prefer any of this over the `observation` table, whose records are historical.
 
 ## Server-level instructions
 
