@@ -684,6 +684,55 @@ class TestEBirdBridge:
         assert "ridrai1" in text
         assert "Ridgway's Rail" in text
 
+    @pytest.mark.parametrize(
+        "code,common,expect",
+        [
+            # SILENT: valid eBird code, wrong bird -> the dangerous class.
+            ("clarai", "Clapper Rail", "ridrai1"),
+            ("commoo", "Common Moorhen", "comgal1"),
+            ("yelwar4", "Yellow-rumped Warbler", "yerwar"),
+            # LOUD: eBird rejects the code, but name the successor anyway.
+            ("wesscr1", "Western Scrub-Jay", "cowscj1"),
+        ],
+    )
+    async def test_stale_codes_are_flagged_with_their_successor(
+        self, plugin, service, code, common, expect
+    ):
+        """Every code here was probed against the live eBird API; the note
+        must name the bird the site actually holds."""
+        service.query_pages = [[{"objectid": 897, "site_name": "X"}]]
+        service.related_pages = [
+            [
+                {
+                    "species_code": code,
+                    "common_name": common,
+                    "iba_genus": "G",
+                    "sci_name": "sp",
+                }
+            ]
+        ]
+        result = await call(
+            plugin, "get_iba_related_records", {"site_id": 202, "category": "species"}
+        )
+        text = result.content[0]["text"]
+        assert expect in text
+        assert common in text
+
+    async def test_unaffected_species_get_no_split_note(self, plugin, service):
+        """Only genuinely stale taxa are flagged -- a blanket warning on every
+        bird would train the reader to ignore it."""
+        service.query_pages = [[{"objectid": 897, "site_name": "X"}]]
+        service.related_pages = [
+            [{"species_code": "loncur", "common_name": "Long-billed Curlew"}]
+        ]
+        result = await call(
+            plugin, "get_iba_related_records", {"site_id": 202, "category": "species"}
+        )
+        text = result.content[0]["text"]
+        assert "Known taxonomy changes" not in text
+        # ...but the general do-not-pass-codes warning still stands.
+        assert "do NOT pass `species_code` to eBird" in text
+
     async def test_species_record_composes_the_binomial(self, plugin, service):
         """sci_name is a bare epithet; the genus lives in iba_genus. Read
         alone, sci_name is half a name and a crosswalk keyed on it mismatches."""

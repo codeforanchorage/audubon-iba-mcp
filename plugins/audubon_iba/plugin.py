@@ -124,29 +124,78 @@ _TAXONOMY_WARNING = (
     "first, then query."
 )
 
-# Splits/lumps since Audubon froze its taxonomy, where the stale code is a
-# VALID eBird code for a DIFFERENT species -- the silent-wrong-answer cases.
-# Keyed by Audubon species_code. This is a curated hint, not an authority:
-# always confirm against eBird's live taxonomy.
+# Taxa Audubon still files under a pre-split name, keyed by the Audubon
+# species_code, with the successor to resolve to.
+#
+# Every code below was probed against the live eBird API on 2026-07-13, and
+# they fall into two classes:
+#
+#   SILENT  -- the stale code is still VALID in eBird but denotes a different
+#              (or effectively unreportable) taxon, so eBird answers "no
+#              records" and the absence-of-evidence disclaimer makes the zero
+#              read as real. These are the dangerous ones.
+#   LOUD    -- the stale code is unknown to eBird, which rejects it outright.
+#              Harmless (the caller cannot miss it), but naming the successor
+#              saves a round-trip.
+#
+# eBird codes are quoted only where they were confirmed against the live API;
+# elsewhere the successor is named as a species, to be resolved through eBird's
+# taxonomy. This table is a curated hint, not an authority -- confirm before
+# reporting, and note the right successor is often region-dependent.
 _KNOWN_TAXONOMY_SPLITS = {
+    # SILENT -- valid eBird code, wrong bird.
     "clarai": (
-        "Rallus longirostris (Clapper Rail) was split in 2014. 'clarai' is "
-        "eBird's code for Clapper Rail (Rallus crepitans), an Atlantic/Gulf "
-        "species absent from the Pacific coast. On western sites this record "
-        "almost certainly means Ridgway's Rail (Rallus obsoletus, eBird "
-        "'ridrai1'); on Gulf/Atlantic sites 'clarai' is correct."
+        "SILENT MISMATCH. Clapper Rail was split in 2014. 'clarai' is still a "
+        "valid eBird code, but it now means Rallus crepitans -- an "
+        "Atlantic/Gulf bird absent from the Pacific coast -- so eBird returns "
+        "a believable 'no records' on western sites. There the bird is "
+        "Ridgway's Rail (Rallus obsoletus, eBird 'ridrai1'); on Gulf/Atlantic "
+        "sites 'clarai' is still correct."
     ),
-    "wesscj": (
-        "Western Scrub-Jay was split in 2016 into California Scrub-Jay "
-        "(eBird 'cowscj1') and Woodhouse's Scrub-Jay ('woscj2')."
-    ),
-    "sagspa1": (
-        "Sage Sparrow was split in 2013 into Bell's Sparrow (eBird "
-        "'belspa2') and Sagebrush Sparrow ('sagspa1')."
+    "commoo": (
+        "SILENT MISMATCH. Common Moorhen was split in 2011. 'commoo' remains "
+        "valid in eBird but denotes the Old World bird, so it returns a "
+        "believable 'no records' anywhere in the Americas. The New World bird "
+        "is Common Gallinule (Gallinula galeata, eBird 'comgal1')."
     ),
     "sagspa": (
-        "Sage Sparrow was split in 2013 into Bell's Sparrow (eBird "
-        "'belspa2') and Sagebrush Sparrow ('sagspa1')."
+        "SILENT MISMATCH. Sage Sparrow was split in 2013. 'sagspa' still "
+        "resolves in eBird but yields no records; the living taxa are Bell's "
+        "Sparrow (coastal/California) and Sagebrush Sparrow (interior). "
+        "Resolve the right one for this site's region via eBird's taxonomy."
+    ),
+    "winwre": (
+        "SILENT MISMATCH. Winter Wren was split in 2010. 'winwre' still "
+        "resolves in eBird but yields no records; the living taxa are Winter "
+        "Wren (eastern) and Pacific Wren (western). Resolve the right one for "
+        "this site's region via eBird's taxonomy."
+    ),
+    "yelwar4": (
+        "SILENT MISMATCH. 'yelwar4' resolves in eBird but returns no records "
+        "anywhere -- it is not the species code for the bird Audubon means. "
+        "Yellow-rumped Warbler is Setophaga coronata, eBird 'yerwar'."
+    ),
+    # LOUD -- eBird rejects the code outright; successor named to save a hop.
+    "wesscr1": (
+        "eBird rejects 'wesscr1'. Western Scrub-Jay was split in 2016 into "
+        "California Scrub-Jay (Aphelocoma californica, eBird 'cowscj1') and "
+        "Woodhouse's Scrub-Jay. Audubon's binomial for this record is the "
+        "California bird."
+    ),
+    "whippo": (
+        "eBird rejects 'whippo'. Whip-poor-will was split in 2010 into Eastern "
+        "Whip-poor-will and Mexican Whip-poor-will; resolve via eBird's "
+        "taxonomy."
+    ),
+    "blasco": (
+        "eBird rejects 'blasco'. Black Scoter was split from Common Scoter; "
+        "Audubon's binomial (Melanitta nigra) is now the Old World bird. The "
+        "American bird is Black Scoter (Melanitta americana)."
+    ),
+    "santer": (
+        "eBird rejects 'santer'. Sandwich Tern's New World population is "
+        "treated as Cabot's Tern by some authorities; resolve via eBird's "
+        "taxonomy."
     ),
 }
 
