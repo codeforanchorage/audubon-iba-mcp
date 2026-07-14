@@ -100,7 +100,7 @@ try:
 except Exception as e:
     check("initialize (instructions present)", False, repr(e))
 
-# 3. tools/list -- the five IBA tools, and none of the catalog-discovery
+# 3. tools/list -- the six IBA tools, and none of the catalog-discovery
 #    tools the fixed-service design deliberately drops.
 try:
     r = rpc("tools/list")
@@ -110,11 +110,12 @@ try:
         "audubon_iba__search_ibas",
         "audubon_iba__get_iba_details",
         "audubon_iba__get_iba_related_records",
+        "audubon_iba__get_iba_boundary",
         "audubon_iba__list_distinct_values",
     }
-    check("tools/list (5 tools)", tools == expected, f"{sorted(tools)}")
+    check("tools/list (6 tools)", tools == expected, f"{sorted(tools)}")
 except Exception as e:
-    check("tools/list (5 tools)", False, repr(e))
+    check("tools/list (6 tools)", False, repr(e))
 
 # 4. VERIFICATION QUERY (1/2) -- point-buffer search around Anchorage.
 site_id = None
@@ -161,18 +162,81 @@ try:
 except Exception as e:
     check("verification query 2: get_iba_related_records(species)", False, repr(e))
 
-# 6. get_iba_details -- ebird_link must be surfaced, it is the integration
-#    point to live sightings.
+# 5b. The species table must warn that its codes are NOT eBird's. Audubon's
+#     taxonomy is frozen pre-2014 and most codes coincide with eBird's, so a
+#     stale one fails silently -- eBird returns a believable "no records" for
+#     a bird that is present. If this warning ever goes missing, the mashup
+#     starts producing confident wrong answers again.
+try:
+    if site_id is None:
+        raise RuntimeError("no site_id from the buffer query")
+    t = text_of(
+        call_tool(
+            "get_iba_related_records",
+            {"site_id": site_id, "category": "species", "limit": 5},
+        )
+    )
+    ok = "do NOT pass `species_code` to eBird" in t and "scientific_name:" in t
+    check(
+        "species records carry the taxonomy warning + composed binomial",
+        ok,
+        "warning + scientific_name present" if ok else "MISSING: " + t[:80],
+    )
+except Exception as e:
+    check("species records carry the taxonomy warning", False, repr(e))
+
+# 6. get_iba_details -- the centroid is the ONLY working bridge to eBird
+#    (eBird has no notion of an IBA id). ebird_link must NOT be sold as an
+#    API identifier: it is a human web URL, and feeding the US-CA_202 inside
+#    it to eBird gets a rejection.
 try:
     t = text_of(call_tool("get_iba_details", {"site_id": site_id or 1004}))
-    ok = "eBird link:" in t and "ebird.org" in t
-    check("get_iba_details (ebird_link surfaced)", ok, t.split("\n")[0][:60])
+    ok = (
+        "eBird bridge" in t
+        and "suggested_radius_km:" in t
+        and "NOT an API identifier" in t
+        and "ebird.org" in t
+    )
+    check(
+        "get_iba_details (centroid bridge, not a fake join key)",
+        ok,
+        t.split("\n")[0][:60],
+    )
 except Exception as e:
-    check("get_iba_details (ebird_link surfaced)", False, repr(e))
+    check("get_iba_details (centroid bridge)", False, repr(e))
+
+# 6b. get_iba_boundary -- real polygon rings. Without these, "inside the IBA"
+#     can only be approximated by a radius around the centroid, which for an
+#     estuary pulls in inland hotspots and misses the river channel.
+try:
+    t = text_of(call_tool("get_iba_boundary", {"site_id": site_id or 1004}))
+    ok = "Bounding box (WGS84):" in t and "Ring 1" in t
+    check(
+        "get_iba_boundary (WGS84 rings + bbox)",
+        ok,
+        t.split("\n")[3][:60] if ok else "ERROR/empty: " + t[:80],
+    )
+except Exception as e:
+    check("get_iba_boundary (WGS84 rings + bbox)", False, repr(e))
+
+# 6c. Regression: a site name containing a SQL keyword must be searchable.
+#     'Union' was rejected as injection, which hid real IBAs entirely.
+try:
+    t = text_of(call_tool("search_ibas", {"name": "Union", "limit": 3}))
+    ok = "TOTAL MATCHING:" in t and "Union" in t and "Forbidden" not in t
+    check(
+        "search_ibas(name='Union') -- SQL keyword in a site name",
+        ok,
+        t.split("\n")[0][:60] if ok else "REJECTED: " + t[:80],
+    )
+except Exception as e:
+    check("search_ibas(name='Union')", False, repr(e))
 
 # 7. search_ibas -- attribute filters + TOTAL MATCHING count
 try:
-    t = text_of(call_tool("search_ibas", {"state": "AK", "priority": "Global", "limit": 3}))
+    t = text_of(
+        call_tool("search_ibas", {"state": "AK", "priority": "Global", "limit": 3})
+    )
     ok = "TOTAL MATCHING:" in t and "site_id:" in t
     check("search_ibas(state=AK, priority=Global)", ok, t.split("\n")[0][:60])
 except Exception as e:
