@@ -397,10 +397,22 @@ class TestSearchIBAs:
         assert "100\\%" in where
         assert "ESCAPE" in where
 
-    async def test_sql_injection_in_filter_is_rejected(self, plugin, service):
+    async def test_injection_attempt_stays_inside_the_literal(self, plugin, service):
+        """A hostile name is searched as text, never executed: the quote is
+        doubled, so the value cannot break out of its string literal."""
         service.query_pages = [[]]
         result = await call(plugin, "search_ibas", {"name": "x'; DROP TABLE iba; --"})
-        assert result.success is False
+        assert result.success is True
+        where = service.query_params()[0]["where"]
+        assert "x''; DROP TABLE iba; --" in where
+
+    async def test_name_containing_sql_keyword_is_searchable(self, plugin, service):
+        """Real site names contain SQL keywords ('Union Slough', 'Grant
+        Lake'); quoted literal content must not trip the injection scan."""
+        service.query_pages = [[]]
+        result = await call(plugin, "search_ibas", {"name": "Union Slough"})
+        assert result.success is True
+        assert "'%Union Slough%'" in service.query_params()[0]["where"]
 
 
 # ── get_iba_details ─────────────────────────────────────────────────────

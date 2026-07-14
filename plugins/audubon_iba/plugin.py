@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 # ArcGIS descriptions and text fields carry HTML and smart punctuation;
 # cleaning these keeps tool output readable and ASCII-safe.
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+# A balanced SQL string literal ('' is an escaped quote inside one).
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 _UNICODE_PUNCT = {
     "‘": "'",
     "’": "'",
@@ -214,7 +217,7 @@ class AudubonIBAPlugin(MCPPlugin):
                     "Find Important Bird Areas within a radius of a lat/lng "
                     "point -- 'which IBAs are near here?'. Buffers the point "
                     "and returns every IBA polygon the buffer intersects, "
-                    "nearest concerns first. Coordinates are WGS84 decimal "
+                    "ordered by site name. Coordinates are WGS84 decimal "
                     "degrees. " + _DESIGNATION_CAVEAT
                 ),
                 input_schema={
@@ -733,7 +736,7 @@ class AudubonIBAPlugin(MCPPlugin):
         if limit < 1:
             raise ValueError(f"limit must be at least 1 (got {limit})")
 
-        where = WhereValidator.validate(params.get("where", "1=1"))
+        where = _validate_where(params.get("where", "1=1"))
         page_size = await self._max_record_count()
 
         records: List[Dict[str, Any]] = []
@@ -770,7 +773,7 @@ class AudubonIBAPlugin(MCPPlugin):
         data = await self._get_json(
             f"{self._layer_url}/query",
             {
-                "where": WhereValidator.validate(where),
+                "where": _validate_where(where),
                 "returnCountOnly": "true",
                 "f": "json",
             },
@@ -943,7 +946,7 @@ class AudubonIBAPlugin(MCPPlugin):
             described.append(f"name~'{name}'")
 
         where = " AND ".join(clauses) if clauses else "1=1"
-        return WhereValidator.validate(where), ", ".join(described)
+        return _validate_where(where), ", ".join(described)
 
     # ── Output formatting ───────────────────────────────────────────────
 
@@ -1057,6 +1060,21 @@ class AudubonIBAPlugin(MCPPlugin):
 
 
 # ── Module-level helpers ────────────────────────────────────────────────
+
+
+def _validate_where(where: str) -> str:
+    """Run the shared WhereValidator with string literals blanked out.
+
+    Every WHERE this plugin sends is composed here, with caller values
+    quote- and wildcard-escaped into string literals. The shared validator
+    scans literal content too, so real site names ('Union Slough', 'Grant
+    Lake') would be rejected as injection. Blanking balanced literals scans
+    only the SQL structure; breaking OUT of a literal takes an unbalanced
+    quote, which leaves the injected tail unstripped and still scanned.
+    """
+    where = (where or "").strip() or "1=1"
+    WhereValidator.validate(_STRING_LITERAL_RE.sub("''", where))
+    return where
 
 
 def _clean_arg(value: Any) -> str:
