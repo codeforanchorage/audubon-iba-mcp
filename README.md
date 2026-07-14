@@ -129,3 +129,15 @@ python -m pytest tests/ -q           # tests
 On Windows, `set PYTHONIOENCODING=utf-8` before `local_server.py` (it prints emoji).
 
 See `CLAUDE.md` and `docs/` for architecture, deployment, and plugin development.
+
+## Credits & thanks
+
+This server is a fork of **[OpenContext](https://github.com/thealphacubicle/OpenContext)**, created by **[Srihari Raman](https://github.com/thealphacubicle)** and released by the **City of Boston, Department of Innovation and Technology** under the MIT License.
+
+Everything that makes this repository work — the plugin architecture, the MCP JSON-RPC server, the Lambda/HTTP adapters, the one-fork-one-server discipline, the deployment tooling — is theirs. This fork only adds a plugin for one bird-conservation dataset on top of that foundation, and the `docs/` you'll find here (architecture, getting started, plugin development) are largely their work, retained as-is.
+
+Publishing a civic data framework as open source, general enough that a bird-conservation dataset in Alaska can ride on a project built for Boston's open data, is a real public good. Thank you to Srihari Raman and to the City of Boston for building it and giving it away.
+
+Thanks also to the **[National Audubon Society](https://www.audubon.org/important-bird-areas)** for publishing the Important Bird Areas data openly, and to the **[Cornell Lab of Ornithology](https://ebird.org/)** for eBird, which this server is designed to compose with.
+
+Licensed MIT — see [`LICENSE`](LICENSE), which retains the original copyright.
