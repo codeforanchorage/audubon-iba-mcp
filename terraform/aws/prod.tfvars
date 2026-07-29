@@ -29,3 +29,14 @@ lambda_reserved_concurrency = 10
 # conversational, so 1 rps sustained per IP (~300/5min) is plenty for
 # real users and tight enough to slow scrapers and denial-of-wallet probes.
 waf_rate_limit_per_5min = 300
+
+# Use the fleet-wide WAF instead of a dedicated ACL for this MCP. A dedicated
+# ACL costs ~$8/mo in fixed AWS charges regardless of traffic; the shared ACL
+# keeps this MCP's 300/5min limit as its own counter, aggregated on
+# (IP, Host) so it stays independent of the other MCPs sharing that limit.
+#
+# The effective limit now lives in mcp-stats' `fleet_waf_members` under the key
+# `audubon-iba` — change it there, not here. The rate-limit value above is retained
+# so that rolling back (use_shared_waf = false) restores the original limit.
+# See mcp-stats/docs/waf-consolidation.md.
+use_shared_waf = true
