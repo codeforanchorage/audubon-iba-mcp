@@ -229,6 +229,9 @@ client/opencontext-client-*
 
 # Config yaml
 config.yaml
+# ...except this fork's root config, which is deliberately tracked (no
+# secrets). Build copies under terraform/aws and .deploy stay ignored.
+!/config.yaml
 examples/
 
 # Claude Code local settings
