@@ -94,7 +94,7 @@ plugins:
     service_url: "https://services1.arcgis.com/lDFzr3JyGEn5Eymu/arcgis/rest/services/iba_polygons_public/FeatureServer"
     layer_id: 0 # IBA polygons
     organization: "National Audubon Society"
-    timeout: 120
+    timeout: 20
     # token: "${ARCGIS_TOKEN}"  # Not needed: the public IBA service is anonymous
   #
   # The other built-in plugins (ckan, arcgis, socrata, anchorage_gis) are
@@ -108,7 +108,7 @@ aws:
   region: "us-west-2" # AWS region for Lambda
   lambda_name: "audubon-iba-mcp" # Lambda function name
   lambda_memory: 512 # Lambda memory in MB (128-10240)
-  lambda_timeout: 120 # Lambda timeout in seconds (max 900)
+  lambda_timeout: 28 # Lambda timeout in seconds (max 900)
 
 # Logging configuration
 logging:

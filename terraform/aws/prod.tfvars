@@ -11,7 +11,7 @@ lambda_memory = 512
 
 # The IBA service is a third-party host we do not control. 120s leaves room
 # for a slow upstream plus a couple of pagination round-trips.
-lambda_timeout = 120
+lambda_timeout = 28
 
 api_quota_limit = 3000
 api_rate_limit  = 5
