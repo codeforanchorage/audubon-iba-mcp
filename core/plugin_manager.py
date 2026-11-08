@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from core.interfaces import MCPPlugin, ToolResult
+from core.interfaces import MCPPlugin, ToolResult, UnknownToolError
 from core.validators import ConfigurationError, get_enabled_plugin_config
 
 logger = logging.getLogger(__name__)
@@ -241,9 +241,7 @@ class PluginManager:
 
         if tool_name not in self.tools:
             available = ", ".join(sorted(self.tools.keys()))
-            raise ValueError(
-                f"Tool '{tool_name}' not found. Available tools: {available}"
-            )
+            raise UnknownToolError(tool_name, available)
 
         plugin_name, actual_tool_name = self.tools[tool_name]
         plugin = self.plugins.get(plugin_name)
@@ -279,13 +277,21 @@ class PluginManager:
             for tool_def in plugin_tools:
                 # Use double underscore separator to match _register_tools
                 prefixed_name = f"{plugin_name}__{tool_def.name}"
-                tools.append(
-                    {
-                        "name": prefixed_name,
-                        "description": tool_def.description,
-                        "inputSchema": tool_def.input_schema,
-                    }
-                )
+                tool_dict: Dict[str, Any] = {
+                    "name": prefixed_name,
+                    "description": tool_def.description,
+                    "inputSchema": tool_def.input_schema,
+                }
+                # `title` is a top-level Tool field, not an annotation. It is
+                # the display name clients prefer over the prefixed `name`,
+                # which is an identifier and reads poorly in a picker.
+                if tool_def.title:
+                    tool_dict["title"] = tool_def.title
+                if tool_def.output_schema:
+                    tool_dict["outputSchema"] = tool_def.output_schema
+                if tool_def.annotations:
+                    tool_dict["annotations"] = tool_def.annotations
+                tools.append(tool_dict)
 
         return tools
 
