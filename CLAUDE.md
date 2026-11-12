@@ -102,7 +102,7 @@ New plugins must implement `MCPPlugin` (or `DataPlugin` for catalog-style data s
 
 ## Configuration
 
-Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config supports `${ENV_VAR}` substitution. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
+Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config does **NOT** support `${ENV_VAR}` substitution: `core/validators.py::load_and_validate_config` is a plain `yaml.safe_load`, so a `${VAR}` reaches the plugin as that literal string. Read secrets from `os.environ` in the plugin's `initialize()` instead, and never put one in `config.yaml` -- it is deployed with the Lambda. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
 
 ## CI
 
