@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -792,6 +792,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "httpx" },
+    { name = "opencontext-core" },
     { name = "pydantic" },
     { name = "python-json-logger" },
     { name = "pyyaml" },
@@ -813,19 +814,30 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "opencontext-core", git = "https://github.com/codeforanchorage/opencontext-core?rev=v1.0.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.0.0" },
-    { name = "python-json-logger", specifier = ">=2.0.0" },
+    { name = "python-json-logger", specifier = ">=3.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "sqlparse", specifier = ">=0.4.4" },
     { name = "tenacity", specifier = ">=8.0.0" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "opencontext-core"
+version = "1.0.0"
+source = { git = "https://github.com/codeforanchorage/opencontext-core?rev=v1.0.0#691bc7af0407bd3d97363543a8bab3536b3795f5" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-json-logger" },
+    { name = "pyyaml" },
+]
 
 [[package]]
 name = "packageurl-python"

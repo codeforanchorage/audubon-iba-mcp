@@ -65,11 +65,11 @@ python3 scripts/smoke_prod.py http://localhost:8000/mcp
 # Tests
 uv run pytest tests/ -n auto                                    # All tests, parallel
 uv run pytest tests/test_audubon_iba_plugin.py -v               # This fork's plugin
-uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # 80% minimum
+uv run pytest tests/ --cov=plugins --cov-report=term-missing  # 80% minimum
 
 # Linting (ruff)
-uv run ruff check core/ plugins/ server/ tests/ --fix
-uv run ruff format core/ plugins/ server/ tests/
+uv run ruff check plugins/ tests/ --fix
+uv run ruff format plugins/ tests/
 
 # Deploy to AWS
 ./scripts/deploy.sh --environment staging
@@ -78,6 +78,8 @@ uv run ruff format core/ plugins/ server/ tests/
 ## Architecture
 
 **Core rule: One Fork = One MCP Server.** Each deployment runs exactly ONE plugin, enforced at config validation time (`core/validators.py`) and at runtime (`PluginManager.load_plugins()`). This fork runs `audubon_iba`. The other built-in plugins (`ckan`, `arcgis`, `socrata`, `anchorage_gis`) remain in `plugins/` as framework code but are disabled; `plugins/arcgis/catalog.json` is a leftover San Diego crawl artifact and is unused here.
+
+**The MCP server core is a dependency, not code in this repo.** `core/` and `server/` come from the [`opencontext-core`](https://github.com/codeforanchorage/opencontext-core) package, pinned to a tag in `requirements.txt` and `pyproject.toml` (keep the two in step; `tests/test_core_dependency.py` checks). To change protocol or transport behaviour, change it there, tag a release, and move the pin here. Do not re-create `core/` or `server/` in this repo: a local copy shadows the package. `scripts/deploy.sh` installs the package next to `plugins/` in the Lambda zip, so the handler string is unchanged. To work on both at once: `pip install -e ../opencontext-core`. Run commands from the repo root, which is where the installed core looks for `plugins/`.
 
 **Request flow:**
 ```
