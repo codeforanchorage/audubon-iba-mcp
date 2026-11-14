@@ -78,7 +78,9 @@ print(f"Smoke testing: {URL}\n")
 # 1. ping
 try:
     r = rpc("ping")
-    check("ping", r.get("result", {}).get("status") == "ok", str(r.get("result")))
+    # The MCP spec defines the ping result as an empty object; the
+    # liveness signal is the response itself, not its body.
+    check("ping", r.get("result") == {}, str(r.get("result")))
 except Exception as e:
     check("ping", False, repr(e))
 
